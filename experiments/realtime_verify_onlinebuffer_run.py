@@ -140,6 +140,7 @@ def main():
     acc = DeePCCostAccumulator(controller_args.controller_costs)
     H_u_offline_base = controller._H_u.copy()
     H_y_offline_base = controller._H_y.copy()
+    offline_base_cols = int(H_u_offline_base.shape[1])
 
     L = int(controller_args.deepc_dims.T_past + controller_args.deepc_dims.T_fut)
     online_buffer = OnlineTrajectoryBuffer(
@@ -298,6 +299,7 @@ def main():
         K=np.array(args.k, dtype=int),
         sigma_y=np.array(args.sigma_y, dtype=float),
         seed=np.array(args.seed, dtype=int),
+        offline_base_cols=np.array(offline_base_cols, dtype=int),
         online_hankel_cols_pre=online_hankel_cols_pre,
         online_hankel_cols_post=online_hankel_cols_post,
         online_buffer_size=online_buffer_size_hist,
@@ -359,10 +361,16 @@ def main():
         label="online buffer size",
         linestyle=":",
     )
-    axes[4].plot(np.arange(combined_hankel_cols.shape[0]), combined_hankel_cols, label="combined Hankel cols")
+    combined_delta_cols = combined_hankel_cols - offline_base_cols
+    axes[4].plot(
+        np.arange(combined_delta_cols.shape[0]),
+        combined_delta_cols,
+        label="combined - offline_base",
+        linewidth=2.0,
+    )
     axes[4].set_xlabel("step")
-    axes[4].set_ylabel("cols")
-    axes[4].set_title("Online + Offline Hankel column counts")
+    axes[4].set_ylabel("delta cols")
+    axes[4].set_title("Online Hankel growth (delta view)")
     axes[4].grid(True, alpha=0.3)
     axes[4].legend()
 

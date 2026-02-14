@@ -1,0 +1,26 @@
+Diagnostic around K=40 collapse step
+K=40 collapse_step=71, collapse_status=user_limit
+K=50 collapse_step=41, collapse_status=user_limit
+
+step, sigma_min_u_k40, status_k40, sigma_min_u_k50, status_k50
+61, 6.89552862e-02, optimal, 1.41581699e-01, optimal
+62, 4.98822780e-02, optimal, 1.67847124e-01, optimal
+63, 7.21743158e-02, optimal, 1.92476248e-01, optimal_inaccurate
+64, 6.08197711e-02, optimal, 1.35325524e-01, optimal
+65, 7.46721168e-02, optimal, 1.26664429e-01, optimal
+66, 6.67672238e-02, optimal, 9.88471708e-02, optimal
+67, 5.24671352e-02, optimal, 1.03253979e-01, optimal
+68, 8.41734940e-02, optimal, 1.15045485e-01, optimal
+69, 7.82643795e-02, optimal, 1.13514059e-01, optimal_inaccurate
+70, 5.74203830e-02, optimal, 1.10407552e-01, optimal
+71, 6.75536535e-02, user_limit, 1.14527062e-01, optimal_inaccurate
+72, 8.17833254e-02, optimal, 9.95227147e-02, optimal
+73, 4.66739820e-02, optimal, 1.28391282e-01, optimal
+74, 6.95687140e-02, optimal, 1.55873688e-01, optimal
+75, 6.75087092e-02, optimal, 1.55785614e-01, optimal
+76, 7.28225828e-02, optimal, 1.04741353e-01, optimal
+77, 5.04549550e-02, optimal, 1.18909350e-01, optimal
+78, 4.05027673e-02, optimal, 1.28153333e-01, user_limit
+79, 4.23289327e-02, optimal_inaccurate, 1.08430461e-01, user_limit
+80, 5.00840929e-02, optimal, 1.39650356e-01, optimal
+81, 5.72674222e-02, optimal_inaccurate, 1.05348049e-01, optimal

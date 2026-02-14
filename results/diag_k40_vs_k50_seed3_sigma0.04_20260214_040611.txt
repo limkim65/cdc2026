@@ -1,0 +1,18 @@
+Diagnostic around K=40 collapse step
+K=40 collapse_step=2, collapse_status=user_limit
+K=50 collapse_step=293, collapse_status=user_limit
+
+step, sigma_min_u_k40, status_k40, sigma_min_u_k50, status_k50
+0, 2.76856444e-02, optimal, 1.11818993e-01, optimal
+1, 6.23373709e-02, optimal, 1.33331257e-01, optimal
+2, 8.02998858e-02, user_limit, 1.41031608e-01, optimal
+3, 6.16498826e-02, optimal, 1.15656602e-01, optimal
+4, 6.62667776e-02, optimal, 1.20358529e-01, optimal
+5, 9.01674474e-02, optimal, 1.37523162e-01, optimal
+6, 9.28883555e-02, optimal, 2.96622839e-01, optimal
+7, 1.24567894e-01, optimal, 2.82079119e-01, optimal
+8, 1.06042696e-01, optimal, 2.47360634e-01, optimal
+9, 1.06406632e-01, optimal_inaccurate, 2.34981676e-01, optimal
+10, 9.13946626e-02, optimal, 1.95683964e-01, optimal
+11, 9.56936596e-02, optimal, 2.20805014e-01, optimal
+12, 1.04401549e-01, optimal, 1.81338888e-01, optimal

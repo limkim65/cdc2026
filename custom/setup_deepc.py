@@ -143,6 +143,11 @@ def run_experiment(
 
     env.close()
 
+    controller.save_history_npz(
+    f"logs/run_K{K}_seed{seed}.npz",
+    extra={"K": K, "seed": seed}
+    )
+
     traj = np.array(traj)
     refs = np.array(refs)
     return traj, preds, g_vals, accumulator.cost, refs

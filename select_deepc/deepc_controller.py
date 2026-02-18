@@ -3,6 +3,7 @@ import warnings
 import cvxpy as cp
 import numpy as np
 from numpy.typing import NDArray
+from typing import Optional
 
 from .base_controllers import BaseController
 from .data_selectors import *
@@ -226,6 +227,17 @@ class DataDrivenPredictiveController(BaseController):
                 ]
 
         self._problem = cp.Problem(cp.Minimize(cost), constr)
+        ####-----####
+        #custom
+        self._problem_tracking_cost=cp.quad_form(
+            self._y - self._reference_traj,
+            np.kron(np.eye(self._T_fut), controller_costs.Q),
+        )
+        self._problem_input_cost=cp.quad_form(
+            (self._u - np.tile(self._input_reference, self._T_fut)),
+            np.kron(np.eye(self._T_fut), controller_costs.R),
+        )
+
 
     def compute_action(self, state: NDArray, reference: NDArray) -> NDArray:
         """Evaluate the deepc policy for a given state"""
@@ -261,6 +273,13 @@ class DataDrivenPredictiveController(BaseController):
                 eps_rel=1e-4,
             )
             solver_status = self._problem.status
+
+            if self._y_past_slack.value is not None:
+                self._last_slack_inf = float(
+                    np.linalg.norm(self._y_past_slack.value, ord=np.inf)
+                )
+            else:
+                self._last_slack_inf = np.nan
 
         except cp.SolverError as e:
             print(f"SolverError:\n{e}")
@@ -298,6 +317,9 @@ class DataDrivenPredictiveController(BaseController):
         self._initial_state_overridden = False
         return computed_action
 
+    def get_last_slack_inf(self):
+        return self._last_slack_inf
+
     def set_initial_state(self, y_past, u_past):
         self._initial_state_overridden = True
         self._initial_run = False
@@ -319,7 +341,20 @@ class DataDrivenPredictiveController(BaseController):
         u_value = np.append(self._u_past.value, self._u.value)
 
         return u_value.reshape((-1, self._m))
+    
+    def get_tracking_cost(self):
+        if self._problem_tracking_cost is None:
+            return 0
+        tracking_cost = self._problem_tracking_cost
 
+        return tracking_cost
+
+    def get_input_cost(self):
+        if self._problem_input_cost is None:
+            return 0
+        input_cost = self._problem_input_cost
+
+        return input_cost
 
 class RocketControllerWrapper(BaseController):
     def __init__(self, base_controller: DataDrivenPredictiveController):
@@ -441,7 +476,7 @@ class StreamingDeePC(BaseController):
             return np.zeros((self._deepc._T_fut, self._m))
 
 
-class SelectDeePC(BaseController):
+class SelectDeePC_original(BaseController):
     """Select-DeePC which selects the datapoints with minimal weights."""
 
     def __init__(
@@ -581,3 +616,257 @@ class SelectDeePC(BaseController):
             return self._deepc.get_planned_input_trajectory()
         except:
             return np.zeros((self._deepc._T_fut, self._m))
+
+
+class SelectDeePC(BaseController):
+    """Select-DeePC which selects the datapoints with minimal weights."""
+
+    def __init__(
+        self,
+        deepc_args: DeePCControllerArgs,
+        selector_callback=None,
+        num_hankel_cols=180,
+        n_iter: int = 1,
+        debug: bool = False,
+    ):
+        self._debug = debug
+        self._T_past = deepc_args.deepc_dims.T_past
+        self._T_fut = deepc_args.deepc_dims.T_fut
+        self._dims = deepc_args.deepc_dims
+        hankel_gen = HankelMatrixGenerator(
+            deepc_args.deepc_dims.T_past, deepc_args.deepc_dims.T_fut
+        )
+        self._H_u, self._H_y = hankel_gen.generate_hankel_matrices(
+            deepc_args.trajectory_data
+        )
+        # print(self._H_u.shape)
+        self._controller_args = [
+            deepc_args.controller_costs,
+            deepc_args.controller_constraints,
+            deepc_args.input_reference,
+            deepc_args.verbose,
+        ]
+        self._deepc = None
+
+        self._num_hankel_cols = (
+            num_hankel_cols if num_hankel_cols != -1 else self._H_u.shape[-1]
+        )
+
+        self._prev_traj_y = None
+        self._prev_traj_u = None
+
+        if selector_callback is None:
+            self._selector_callback = LkSelector(deepc_args.deepc_dims)
+        else:
+            self._selector_callback = selector_callback
+
+        self._n_iter = n_iter
+        self._solve_time_avg = {
+            "selection": RecursiveAverager(),
+            "solve": RecursiveAverager(),
+        }
+        self._min_selected_sigma_history = []
+        self._last_selected_idcs = np.array([], dtype=int)
+
+        #custom
+        self._eps_sigma=0.0
+        self._K_opt_history = []
+        self._selected_idcs_history = []
+        self._sigma_min_A_history = []
+        self._slack_norm_inf_history = []
+        self._slack_violation_history = []
+        self._tracking_cost_history = []
+        self._input_cost_history = []
+        self._stage_cost_history = []
+        self._solve_time_ms_history = []
+        self._status_history = []
+        
+
+    def compute_action(self, state, reference):
+        step_min_sigma = np.nan
+        
+
+
+        for curr_iter in range(self._n_iter):
+            if self._deepc is None:
+                self._y_past = np.tile(state, self._T_past)
+                self._u_past = np.tile(np.zeros(self._dims.m), self._T_past)
+                state_traj = np.tile(state, self._T_past + self._T_fut).reshape(-1, 1)
+                input_traj = np.zeros(
+                    self._dims.m * (self._T_past + self._T_fut)
+                ).reshape(-1, 1)
+
+            else:
+                if curr_iter == 0:
+                    self._y_past = np.append(self._y_past[self._dims.p :], state)
+
+                state_traj = self._deepc.get_planned_state_trajectory().reshape(-1, 1)
+                input_traj = self._deepc.get_planned_input_trajectory().reshape(-1, 1)
+
+            time_before_sel = perf_counter()
+            idcs, norms = self._selector_callback(
+                input_traj,
+                state_traj,
+                self._H_u,
+                self._H_y,
+                reference,
+            )
+            time_after_sel = perf_counter()
+
+            idcs = idcs[: self._num_hankel_cols]
+            self._last_selected_idcs = idcs.copy()
+            if idcs.size > 0:
+                singular_values = np.linalg.svd(self._H_u[:, idcs], compute_uv=False)
+                step_min_sigma = float(np.min(singular_values))
+
+            #####----#####
+            #custom 
+            k_opt = idcs.size
+            self._K_opt_history.append(k_opt)
+            self._selected_idcs_history.append(idcs)
+             
+            m = self._dims.m
+            p = self._dims.p
+            Tp = self._T_past
+            Tf = self._T_fut
+      
+            u_ini_rows = m * Tp
+            u_tot_rows = m * (Tp+ Tf)
+            y_ini_rows = p * Tp
+            y_tot_rows = p * (Tp+Tf)
+            U_ini_selected = self._H_u[:u_ini_rows, idcs]          # U_p
+            U_fut_selected = self._H_u[u_ini_rows:u_tot_rows, idcs] # U_f
+            Y_ini_selected = self._H_y[:y_ini_rows, idcs]          # Y_p
+            # debugging..
+            # U_ini_selected, U_fut_selected, Y_ini_selected 슬라이싱 인덱싱이 잘 되었는지 확인
+            # 세 부분을 다시 vstack (원래 H_u, H_y의 선택된 열과 비교)
+            U_sel_reconstructed = np.vstack([U_ini_selected, U_fut_selected])
+            Y_sel_reconstructed = Y_ini_selected  # Y는 Y_p 만 사용했으므로 비교는 아래와 같이
+            H_u_sel = self._H_u[:, idcs]
+            H_y_sel = self._H_y[:, idcs]
+            
+            check_u = np.allclose(U_sel_reconstructed, H_u_sel)
+            check_y = np.allclose(Y_sel_reconstructed, H_y_sel[:y_ini_rows, :])
+
+            if not (check_u and check_y):
+                print(
+                    f"[sanity check] U 재조합 일치 여부: {check_u}, Y 재조합 일치 여부: {check_y} "
+                    f"U_sel_reconstructed.shape={U_sel_reconstructed.shape}, H_u_sel.shape={H_u_sel.shape}, "
+                    f"Y_sel_reconstructed.shape={Y_sel_reconstructed.shape}, H_y_sel.shape={H_y_sel.shape}"
+                )
+            
+            #A=np.block(
+            #    [
+            #        [U_ini_selected, np.zeros(U_ini_selected.shape[0],self._m * (self._T_past + self._T_fut)), np.zeros(U_ini_selected.shape[0],self._p * (self._T_past))]
+            #        [Y_ini_selected, np.zeros(Y_ini_selected.shape[0], self._m * (self._T_past + self._T_fut)), np.eyes(self._p * (self._T_past))]
+            #        [Y_fut_selected, -np.eye(self._m * (self._T_past + self._T_fut)), np.zeros(self._m * (self._T_past + self._T_fut),self._p*self._T_past)]
+            #    ]
+            #)
+            A_g=np.vstack(
+                [
+                    U_ini_selected,
+                    Y_ini_selected,
+                    U_fut_selected,
+                ]
+            )
+            sigular_values_A_g=np.linalg.svd(A_g, compute_uv=False)
+            step_min_sigma_A_g = float(np.min(singular_values_A_g))
+            self._sigma_min_A_history.append(step_min_sigma_A_g)
+
+            #####----#####
+
+
+            prev_u = None
+            if self._deepc is not None:
+                prev_u = self._deepc._prev_u
+                ol_idx = self._deepc._open_loop_index
+
+            if self._debug:
+                plt.plot(self._H_y[0::5, idcs], self._H_y[2::5, idcs])
+                # plt.plot(reference[:, 0], reference[:, 1], "b--")
+                plt.plot(
+                    state_traj[0::5],
+                    state_traj[2::5],
+                    c="red",
+                    linestyle="--",
+                    marker="x",
+                )
+
+            self._deepc = DataDrivenPredictiveController(
+                self._H_u[:, idcs],
+                self._H_y[:, idcs],
+                self._dims,
+                *self._controller_args,
+                decompose_hankel_matrix=idcs.size > 400,
+            )
+            if prev_u is not None:
+                self._deepc._prev_u = prev_u
+                self._deepc._open_loop_index = ol_idx
+
+            self._deepc.set_initial_state(self._y_past, self._u_past)
+            time_before_solve = perf_counter()
+            action = self._deepc.compute_action(state, reference)
+            time_after_solve = perf_counter()
+
+            self._solve_time_avg["selection"].update(time_after_sel - time_before_sel)
+            self._solve_time_avg["solve"].update(time_after_solve - time_before_solve)
+
+        self._min_selected_sigma_history.append(step_min_sigma)
+        self._u_past = np.append(self._u_past[self._dims.m :], action)
+
+
+        ####-----####
+        #custom
+        slack_inf = float(self._deepc.get_last_slack_inf())
+        self._slack_norm_inf_history.append(slack_inf)
+        eps = self._eps_sigma# 미리 클래스에 저장해둔 threshold
+        self._slack_violation_history.append(int(slack_inf > eps))
+
+        self._tracking_cost_history.append(self._deepc.get_tracking_cost())
+        self._input_cost_history.append(self._deepc.get_input_cost())
+        self._stage_cost_history.append(self._deepc.get_tracking_cost()+self._deepc.get_input_cost())
+        self._solve_time_ms_history.append(1000.0*(time_after_solve - time_before_solve))
+        self._status_history.append(None)
+
+        ####-----####
+
+
+        return action
+
+    def get_min_selected_singular_values(self):
+        return np.array(self._min_selected_sigma_history, dtype=float)
+
+    def get_last_selected_idcs(self):
+        return np.array(self._last_selected_idcs, dtype=int)
+
+    def get_planned_state_trajectory(self):
+        try:
+            return self._deepc.get_planned_state_trajectory()
+        except:
+            return np.zeros((self._deepc._T_fut, self._p))
+
+    def get_planned_input_trajectory(self):
+        try:
+            return self._deepc.get_planned_input_trajectory()
+        except:
+            return np.zeros((self._deepc._T_fut, self._m))
+
+
+    def save_history_npz(self, path: str, extra: Optional[dict] = None) -> None:
+        """Save per-step histories to a .npz file for offline postprocessing."""
+        payload = {
+            "K_opt": np.asarray(self._K_opt_history, dtype=float),
+            "sigma_min_Hu": np.asarray(self._min_selected_sigma_history, dtype=float),
+            "sigma_min_Ag": np.asarray(self._sigma_min_A_history, dtype=float),
+            "slack_inf": np.asarray(self._slack_norm_inf_history, dtype=float),
+            "slack_fail": np.asarray(self._slack_violation_history, dtype=int),
+            "tracking_cost": np.asarray(self._tracking_cost_history, dtype=float),
+            "input_cost": np.asarray(self._input_cost_history, dtype=float),
+            "stage_cost": np.asarray(self._stage_cost_history, dtype=float),
+            "solve_time_ms": np.asarray(self._solve_time_ms_history, dtype=float),
+            "eps_sigma": np.asarray([float(getattr(self, "_eps_sigma", np.nan))]),
+        }
+        if extra is not None:
+            for k, v in extra.items():
+                payload[str(k)] = v
+        np.savez_compressed(path, **payload)

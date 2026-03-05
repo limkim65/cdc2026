@@ -1,0 +1,2 @@
+trial_id,N_loc,sigma_bar,total_cost,rmse_ee,solve_time_mean_ms,Kopt_mean,score_cost_rmse
+79,20000,0.2,0.0291379867653645,0.0401880781735664,177.17120075103594,68.475,0.0

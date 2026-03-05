@@ -1,0 +1,19 @@
+runs=100, steps=20000
+sigma_Mk_min unique count by seed:
+  seed 0: 1
+  seed 1: 1
+  seed 2: 1
+  seed 3: 1
+  seed 4: 1
+
+Main correlations (run-level x=sigma_Mk_min):
+  rmse_ee: pear=0.5594, spear=0.5835
+  total_cost: pear=0.5340, spear=0.5835
+  solve_ms_mean: pear=-0.1308, spear=-0.2744
+  solve_ms_p95: pear=0.1939, spear=0.2312
+  slack_inf_max: pear=-0.4506, spear=-0.5990
+  slack_inf_mean: pear=0.0896, spear=-0.1945
+
+Main correlations (step-level x=sigma_min_Mk):
+  solve_ms: pear=-0.0460, spear=-0.0476
+  slack_inf: pear=0.0374, spear=0.1142

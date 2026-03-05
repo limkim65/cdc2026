@@ -1,0 +1,2 @@
+K,runs,median_sigma_min_Ag,median_kappa_Ag,median_localness,median_slack_max,median_kkt_max,median_rmse_ee,success_rate,median_total_cost,median_jerk_sum_sq,median_solve_ms,median_k_opt_mean
+100.0,1,8.113798896695393e-08,6992560.798668929,1.4853613543485837,0.009264317945175179,20051635.476945333,0.06295208162432825,0.0,0.0368062267597129,1.1215754384291192,294.72725350235123,100.0

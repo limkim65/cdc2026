@@ -1,0 +1,158 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{amsmath} % 수학 기호 및 \text 사용을 위해 필요
+\usepackage{amsmath,amssymb,amsthm}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{remark}{Remark}
+
+\title{DDPC}
+\author{yelimkim}
+\date{December 2025}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+\subsection*{Motivation}
+Data-Enabled Predictive Control (DeePC) enables model-free predictive control directly from input--output data. 
+However, in practical scenarios involving nonlinear or time-varying systems, 
+online data selection becomes essential to ensure locality and computational tractability.
+
+\subsection*{Need for Data Selection}
+Data selection is typically motivated by:
+\begin{itemize}
+    \item \textbf{Locality:} selecting trajectory segments that are similar to the current operating regime.
+    \item \textbf{Computation Time:} reducing the size of the Hankel matrix to lower online optimization cost.
+\end{itemize}
+
+\subsection*{Gap}
+Existing selection-based DeePC approaches do not explicitly verify whether the selected data preserves 
+\emph{quantitative persistency of excitation} (qPE), i.e., whether the minimum singular value condition remains satisfied after selection.
+
+\subsection*{Contribution}
+We propose a conditioning-aware data selection framework that:
+\begin{itemize}
+    \item Analyzes selection-induced degradation of quantitative PE.
+    \item Connects conditioning loss to KKT sensitivity of the DeePC optimization.
+    \item Introduces an adaptive-$K$ selection rule enforcing a minimum singular value margin.
+\end{itemize}
+
+
+
+\section{Preliminaries}
+
+\subsection{Hankel Matrix Construction}
+Define the Hankel matrices constructed from offline input--output trajectories.
+
+\subsection{Willems' Fundamental Lemma}
+State the classical result for LTI systems under persistency of excitation.
+
+\subsection{Persistency of Excitation (PE)}
+Discuss the rank-based PE condition.
+
+\subsection{Quantitative PE}
+Introduce the quantitative PE condition:
+\[
+\sigma_{\min}(H_u) \ge \gamma,
+\]
+which provides robustness in the presence of noise and uncertainty.
+
+\subsection{Problem Statement}
+Given a similarity-based selection mechanism, design a selection rule such that the selected Hankel matrix maintains quantitative PE.
+
+\subsection{Notation}
+Define symbols used throughout the paper.
+
+
+
+\section{DeePC Formulation and KKT Sensitivity}
+
+\subsection{Regularized DeePC as a Quadratic Program}
+Present the regularized DeePC formulation with slack variables.
+
+\subsection{KKT System}
+Derive the associated KKT linear system.
+
+\subsection{Sensitivity Bound}
+Show that solution sensitivity is governed by the minimum singular value of the KKT matrix:
+\[
+\|\Delta x\|_2 \le \frac{1}{\sigma_{\min}(K)} \|\Delta b\|_2.
+\]
+
+\subsection{Relation to Singular Values of the Data Matrix}
+Explain why conditioning degradation can be analyzed through singular values of the selected data blocks.
+
+
+
+\section{Selection-Induced Conditioning Degradation}
+
+\subsection{Similarity-Based Selection}
+Define the baseline selection strategy.
+
+\subsection{Singular Value Collapse}
+Explain how similarity-based selection may induce redundancy and reduce $\sigma_{\min}$.
+
+\subsection{Justification of the Proxy Matrix $A_g$}
+Justify using
+\[
+A_g = \begin{bmatrix} U_p \\ Y_p \\ U_f \end{bmatrix}
+\]
+as a conditioning proxy instead of the full KKT matrix.
+
+
+
+\section{Conditioning-Aware Adaptive Selection}
+
+\subsection{Conditioning Margin}
+Define the hybrid margin
+\[
+\Gamma = \max\{\gamma_{\min}, \rho \sigma_{\min}(A_{\rm ref})\}.
+\]
+
+\subsection{Adaptive-$K$ Rule}
+Define
+\[
+K^\star = \min \{K : \sigma_{\min}(A_g(\mathcal{S}_K)) \ge \Gamma \}.
+\]
+
+\subsection{Termination Guarantee}
+Provide a proposition ensuring termination under mild assumptions.
+
+\subsection{Optional: Locality Metric Monotonicity}
+Discuss locality--conditioning trade-off if needed.
+
+
+
+\section{Numerical Examples}
+
+\subsection{Evaluation Metrics}
+Define phase transition metrics, slack-failure rate, success rate, and cost.
+
+\subsection{Quantitative PE Collapse under Fixed $K$}
+Demonstrate singular value collapse via $K$ sweep.
+
+\subsection{Fixed-$K$ vs Adaptive-$K$}
+Compare baseline selection and conditioning-aware selection 
+in the inverted pendulum regulation task.
+
+\subsection{Noise Sweep}
+Evaluate robustness under increasing measurement noise.
+
+
+
+\section{Conclusion}
+
+Summarize the findings and outline directions for future research.
+
+\end{document}

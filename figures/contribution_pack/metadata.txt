@@ -1,0 +1,11 @@
+fixed_dir=c:/Users/yelim/Desktop/paper/cdc2026/choose-wisely-paper-main\logs\reacher\fixed_k_sweep_dir\reacher_cdc_fixed
+adapt_dir=c:/Users/yelim/Desktop/paper/cdc2026/choose-wisely-paper-main\logs\reacher\adaptive_k_dir\reacher_cdc_adapt_rho_seed10_Kmin40
+Kstar=80.0
+tau_for_recovery=2.97526069e-04
+recovery_rho=0.3
+files:
+- C1_fixedK_phase_transition.png
+- C2_adaptive_rho_frontier.png
+- C3_recovery_gallery.png
+- C4_event_aligned_recovery.png
+- C5_noise_robustness.png

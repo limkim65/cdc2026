@@ -1,0 +1,10 @@
+fixed_npz=c:/Users/yelim/Desktop/paper/cdc2026/choose-wisely-paper-main\logs\reacher\fixed_k_sweep_dir\reacher_cdc_fixed\run_fixed_k_K040_rho0.005_Kmin20_Kmax320_Kstep10_gmin1e-06_seed002.npz
+adaptive_npz=c:/Users/yelim/Desktop/paper/cdc2026/choose-wisely-paper-main\logs\reacher\adaptive_k_dir\reacher_adaptive_k_rho_sweep_2\run_Kmin40_Kmax200_Kstep5_rho0.2_gmin1e-06_seed002.npz
+tau=2.97526069e-04
+tau_q=0.100
+P(infeas|sigma<tau)=0.1000
+P(infeas|sigma>=tau)=0.0389
+lift=0.0611
+Kstar=80.0
+adaptive_kopt_median=69.600
+adaptive_kopt_p90=73.120

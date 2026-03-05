@@ -1,0 +1,2 @@
+measurement_noise_std,runs,median_total_cost,median_rmse_ee,median_sigma_min_Ag,median_slack_max,median_solve_ms,success_rate
+0.0,5,0.0998432494739852,0.076810385959118,2.8631922347108497e-05,0.008715037146419637,204.14302074466832,0.2

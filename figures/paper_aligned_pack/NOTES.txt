@@ -1,0 +1,15 @@
+Pendulum log availability:
+- pendulum-like npz found: 0
+- none found in logs for regenerated figures; used reacher benchmark logs.
+
+Paper-aligned mapping:
+- P1: fixed-K collapse (Numerical Examples: qPE collapse)
+- P2: adaptive empirical K* behavior + termination/saturation check
+- P3: recovery mechanism (adaptive K response)
+- P4: noise sweep robustness
+- P5: sensitivity proxy (links to KKT sensitivity discussion)
+
+gamma_min=1e-06
+Kmax=320.0
+target_rho_for_recovery=0.6
+tau_for_recovery=1.24832981e-03

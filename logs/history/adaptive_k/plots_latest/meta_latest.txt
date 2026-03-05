@@ -1,0 +1,11 @@
+latest_npz: logs/adaptive_k/run_rho0.002_seed009.npz
+keys: K_opt, selected_idcs, sigma_min_Hu, sigma_min_Ag, slack_inf, slack_fail, tracking_cost, input_cost, stage_cost, solve_time_ms, solver_status, eps_sigma, adaptive_k, rho, gamma_min, Kmin, Kmax, Kstep, seed, steps
+Kmax: 200
+Kmin: 40
+Kstep: 1
+adaptive_k: True
+eps_sigma: 0.001
+gamma_min: 1e-06
+rho: 0.002
+seed: 9
+steps: 200

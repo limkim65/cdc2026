@@ -1,0 +1,2 @@
+rho,runs,success_count_upright_hold,failure_count_upright_hold,median_sigma_inf_max,median_sigma_inf_mean,median_k_opt,median_total_cost,median_mean_solve_time_ms,median_total_solve_time_ms,success_rate_upright_hold,failure_rate_upright_hold
+0.001,10,0,10,5.845242003810634,1.9092521026004574,40.0,1508723.611195743,121.14637577783489,9907.427900092443,0.0,1.0

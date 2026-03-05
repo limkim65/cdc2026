@@ -1,0 +1,2 @@
+rho,steps,k_opt_median,sigma_inf_max,sigma_inf_mean,slack_fail_rate,total_cost,mean_solve_time_ms,total_solve_time_ms,min_sigma_min_Ag,min_sigma_min_Hu
+0.004,200.0,40.0,4.868985445176892,1.1637225699408287,1.0,28824332.23745238,215.43841174905538,40653.916800016304,0.0001019932371152,0.04347861639207815

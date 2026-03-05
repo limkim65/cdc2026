@@ -483,6 +483,113 @@ def run_reacher_simulator(
     )
 
 
+
+def run_reacher_simulator_sensitivity_analysis(
+    env: gym.Env,
+    controller: BaseController,
+    setpoint_scheduler: SetPointScheduler = None,
+    seed=0,
+    deepc_cost_accumulator: Optional[PerformanceAccumulator] = None,
+):
+    """Runs the simulation for a given env and controller"""
+    controller_state_trajectory = []
+    controller_input_trajectory = []
+
+    can_get_planned_trajectories = hasattr(
+        controller, "get_planned_state_trajectory"
+    ) and hasattr(controller, "get_planned_input_trajectory")
+
+    controller_state_predictions = [] if can_get_planned_trajectories else None
+    controller_input_predictions = [] if can_get_planned_trajectories else None
+
+    simulation_iteration = 0
+    obs, info = env.reset(seed=seed)  # specify a random seed for consistency
+
+    controller_execution_times = []
+
+    # simulate
+    while True:
+
+        if setpoint_scheduler is not None:
+            controller_reference = setpoint_scheduler(obs, env=env)
+        else:
+            assert False
+
+        # get action
+        time_start = perf_counter()
+        obs_transformed = obs.copy()
+        obs_transformed[4:6] += obs[8:10]
+        obs_transformed = obs_transformed[[0, 1, 2, 3, 4, 5, 6, 7]]
+        action = controller.compute_action(obs_transformed, controller_reference)
+        time_stop = perf_counter()
+        controller_execution_times.append(time_stop - time_start)
+
+        
+
+        if simulation_iteration % 5 == 0 and can_get_planned_trajectories:
+            controller_state_predictions.append(
+                controller.get_planned_state_trajectory()
+            )
+            controller_input_predictions.append(
+                controller.get_planned_input_trajectory()
+            )
+
+        controller_state_trajectory.append(obs)
+        controller_input_trajectory.append(action)
+
+        simulation_iteration += 1
+
+        if deepc_cost_accumulator is not None:
+            deepc_cost_accumulator.update_cost(
+                obs_transformed, controller_reference, action
+            )
+
+        if action is None:
+            print("none action:((")
+            break
+
+        next_obs, _, done, truncated, info = env.step(action)
+
+        # check if simulation ended
+        if done or truncated:
+            print(f"Simulation is done {done} and truncated {truncated}")
+            print(f"info:\n{info}")
+            if (
+                not setpoint_scheduler.is_successful(next_obs)
+                and deepc_cost_accumulator is not None
+            ):
+                deepc_cost_accumulator.cost = np.inf
+            break
+
+        
+
+        # update observation
+        obs = next_obs
+
+    env.close()  # video saved at this step
+
+    controller_execution_times = 1000 * np.array(controller_execution_times)
+    print(
+        f"Average controller execution time: {np.mean(controller_execution_times)}ms, std: {np.std(controller_execution_times)}ms"
+    )
+
+    controller_state_predictions = np.array(controller_state_predictions)
+    controller_input_predictions = np.array(controller_input_predictions)
+    controller_state_trajectory = np.array(controller_state_trajectory)
+    controller_input_trajectory = np.array(controller_input_trajectory)
+
+    return (
+        controller_state_trajectory,
+        controller_input_trajectory,
+        controller_state_predictions,
+        controller_input_predictions,
+        deepc_cost_accumulator.cost if deepc_cost_accumulator is not None else np.nan,
+        controller._solve_time_avg,
+    )
+
+
+
+
 def plot_trajectory(
     x_traj, x_traj_predictions, plot_heading=True, shift_preds=False, filename=None
 ):

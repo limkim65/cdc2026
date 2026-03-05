@@ -1,0 +1,28 @@
+parsed_rows=99
+N_loc=[100, 200, 500, 1000, 2000, 10000, 20000, 30000]
+sigma=[0.2, 0.3, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.8, 1.0, 2.0, 5.0]
+
+Correlation (sigma vs metric)
+          scope    metric   pearson  spearman  n
+            all Kopt_mean  0.431940  0.629828 99
+            all t_mean_ms -0.041470 -0.016538 99
+            all      rmse -0.066616 -0.042649 99
+            all slack_max  0.124864  0.077285 99
+            all      succ -0.095347 -0.125128 99
+     sigma<=1.0 Kopt_mean  0.772198  0.764443 84
+     sigma<=1.0 t_mean_ms  0.057823  0.109199 84
+     sigma<=1.0      rmse  0.070364  0.104816 84
+     sigma<=1.0 slack_max -0.187748 -0.080670 84
+     sigma<=1.0      succ  0.188057  0.175007 84
+0.3<=sigma<=0.8 Kopt_mean  0.746398  0.721664 69
+0.3<=sigma<=0.8 t_mean_ms  0.273871  0.199610 69
+0.3<=sigma<=0.8      rmse  0.023124  0.046355 69
+0.3<=sigma<=0.8 slack_max  0.065330  0.067327 69
+0.3<=sigma<=0.8      succ       NaN       NaN 69
+
+Failures (succ=0)
+ N_loc  sigma_bar  succ    rmse  t_mean_ms  slack_max  Kopt_mean  seed
+ 10000        2.0     0 0.11050       85.9   0.000274     2200.0     1
+ 20000        2.0     0 0.11340       80.3   0.000308     2200.0     1
+ 30000        0.2     0 0.08344       62.6   0.000323       56.5     1
+ 30000        2.0     0 0.10490       69.4   0.000316     2130.0     1

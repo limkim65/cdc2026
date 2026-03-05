@@ -1,0 +1,5 @@
+tau=2.97526069e-04
+tau_quantile=0.100
+selection_condition=rho=0.3 from reacher_cdc_adapt_rho_seed10_Kmin40
+num_selected=6
+num_aligned_events=258

@@ -73,6 +73,62 @@ class LkSelector:
         return H_u, H_y
 
 
+class AdaptiveLkSelector:
+    def __init__(
+        self,
+        order=1,
+        deepc_dims: DeePCDims = None,
+        forgetting_factor=1,
+        custom_callback=None,
+    ) -> None:
+        """Simple L norm selector of order k. Can use a forgetting factor."""
+        self._order = order
+        self._custom_callback = custom_callback
+
+        if deepc_dims is not None:
+            self._forgetter_u = np.array(
+                [
+                    np.ones((deepc_dims.m)) * forgetting_factor**i
+                    for i in range(deepc_dims.T_past + deepc_dims.T_fut)
+                ]
+            ).reshape(-1, 1)
+            self._forgetter_y = np.array(
+                [
+                    np.ones((deepc_dims.p)) * forgetting_factor**i
+                    for i in range(deepc_dims.T_past + deepc_dims.T_fut)
+                ]
+            ).reshape(-1, 1)
+
+    def get_selector_name(self):
+        return f"l{self._order}"
+
+    def __call__(self, input_traj, state_traj, H_u, H_y, reference):
+        adjusted_H_u = H_u - input_traj
+        adjusted_H_y = H_y - state_traj
+
+        if self._custom_callback is not None:
+            adjusted_H_u, adjusted_H_y = self._custom_callback(
+                adjusted_H_u, adjusted_H_y
+            )
+
+        if hasattr(self, "_forgetter_u"):
+            adjusted_H_u *= self._forgetter_u
+            adjusted_H_y *= self._forgetter_y
+
+        norms = np.linalg.norm(adjusted_H_u, ord=self._order, axis=0) + np.linalg.norm(
+            adjusted_H_y, ord=self._order, axis=0
+        )
+
+        idcs = np.argsort(norms)
+        return idcs, norms
+
+    @staticmethod
+    def position_equivariancer(H_u, H_y):
+        """Sets positional elements of Hankel matrix to 0"""
+        H_y[::6, :] = 0
+        H_y[1::6, :] = 0
+        return H_u, H_y
+
 class CosineDistances:
     def __init__(
         self,

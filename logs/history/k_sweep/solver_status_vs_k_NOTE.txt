@@ -1,0 +1,4 @@
+Solver status vs K is unavailable in current k_sweep logs.
+Reason: logs/k_sweep/summary.csv has no solver-status column, and run_*.npz has no status key.
+Available keys in run_*.npz: K, K_opt, eps_sigma, input_cost, seed, sigma_min_Ag, sigma_min_Hu, slack_fail, slack_inf, solve_time_ms, stage_cost, steps, tracking_cost
+If needed, save OSQP/CVXPY problem.status per step in SelectDeePC.save_history_npz and rerun sweep.

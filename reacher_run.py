@@ -16,11 +16,13 @@ from experiments.reacher.run_cdc_reacher_benchmark import (  # noqa: E402
     compute_success,
     fix_dataset,
     get_cost_dict,
+    replay_targets,
     setup_deepc_reacher,
 )
 from select_deepc.data_selectors import LkSelector  # noqa: E402
 from select_deepc.data_selectors import AdaptiveLkSelector  # noqa: E402
 from select_deepc.deepc_controller import SelectDeePC  # noqa: E402
+from select_deepc.deepc_controller import AdaptiveSelectDeePC  # noqa: E402
 from select_deepc.deepc_dataclasses import DeePCControllerArgs, DeePCDims, DeePCConstraints, DeePCCost
 from select_deepc.deepc_utils import (  # noqa: E402
     DeePCCostAccumulator,
@@ -43,6 +45,70 @@ def safe_stat(values, fn, default=np.nan):
     return float(fn(arr))
 
 
+def history_or_default(controller, method_name, length, default=np.nan, dtype=float):
+    method = getattr(controller, method_name, None)
+    if callable(method):
+        try:
+            arr = np.asarray(method())
+            if arr.size > 0:
+                return arr
+        except Exception:
+            pass
+    return np.full(max(1, int(length)), default, dtype=dtype)
+
+
+def parse_bool_arg(value):
+    if isinstance(value, bool):
+        return value
+    val = str(value).strip().lower()
+    if val in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if val in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected boolean value, got: {value}")
+
+
+def plot_xy_trajectory_with_goal(
+    x_traj,
+    goal_xy_traj,
+    outdir,
+    filename="fig_xy_trajectory_goal.png",
+    show=True,
+):
+    import matplotlib.pyplot as plt
+
+    x_arr = np.asarray(x_traj, dtype=float)
+    g_arr = np.asarray(goal_xy_traj, dtype=float)
+    if x_arr.ndim != 2 or x_arr.shape[0] == 0:
+        return
+    if x_arr.shape[1] < 10:
+        return
+
+    ee_xy = x_arr[:, 4:6] + x_arr[:, 8:10]
+    n = min(ee_xy.shape[0], g_arr.shape[0] if g_arr.ndim == 2 else 0)
+    if n <= 0:
+        return
+    ee_xy = ee_xy[:n]
+    g_arr = g_arr[:n]
+
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=160)
+    ax.plot(ee_xy[:, 0], ee_xy[:, 1], color="#1f77b4", linewidth=2.0, label="trajectory")
+    ax.plot(g_arr[:, 0], g_arr[:, 1], color="#d62728", linewidth=1.8, linestyle="--", label="goal")
+    ax.scatter(ee_xy[0, 0], ee_xy[0, 1], color="#1f77b4", marker="o", s=36, label="start")
+    ax.scatter(ee_xy[-1, 0], ee_xy[-1, 1], color="#1f77b4", marker="x", s=42, label="end")
+    ax.scatter(g_arr[-1, 0], g_arr[-1, 1], color="#d62728", marker="*", s=85, label="goal(final)")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title("End-Effector Trajectory vs Goal (XY)")
+    ax.axis("equal")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(outdir, filename))
+    if show:
+        plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Simple Reacher runner.")
     parser.add_argument(
@@ -57,18 +123,24 @@ def main():
     parser.add_argument("--n_iter", type=int, default=1)
     parser.add_argument("--adaptive_k", action="store_true")
     parser.add_argument("--rho", type=float, default=0.3)
-    parser.add_argument("--Kmin", type=int, default=40)
-    parser.add_argument("--Kmax", type=int, default=320)
+    parser.add_argument("--Kmin", type=int, default=60)
+    parser.add_argument("--Kmax", type=int, default=10000)
     parser.add_argument("--Kstep", type=int, default=1)
-    parser.add_argument("--gamma_min", type=float, default=1e-6)
-    parser.add_argument("--eps_sigma", type=float, default=1e-3)
     parser.add_argument("--success_eps", type=float, default=0.01)
     parser.add_argument("--success_window", type=int, default=20)
     parser.add_argument("--num_extra_targets", type=int, default=0)
     parser.add_argument("--enable_measurement_constraint", action="store_true")
     parser.add_argument("--N_loc", type=int, default=1000)
     parser.add_argument("--d_max", type=float, default=10.0)
+    parser.add_argument("--d_gate", type=parse_bool_arg, nargs="?", const=True, default=False)
+    parser.add_argument("--cond_gate", type=parse_bool_arg, nargs="?", const=True, default=False)
     parser.add_argument("--sigma_bar", type=float, default=1e-6)
+
+    parser.add_argument(
+        "--record_video",
+        action="store_true",
+        help="Enable MuJoCo rendering and RecordVideo output.",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -126,22 +198,33 @@ def main():
         num_steps=int(args.max_steps),
         video_folder=os.path.join(args.outdir, "video"),
         video_title="reacher_run",
+        record_video=bool(args.record_video),
     )
 
 
-    deepc = SelectDeePC(
-        controller_args,
-        selector_callback=AdaptiveLkSelector(order=2),
-        sigma_bar=float(args.sigma_bar),
-        N_loc=int(args.N_loc),
-        d_max=float(args.d_max),
-        num_hankel_cols=int(args.K),
-        n_iter=int(args.n_iter),
-        K_min=int(args.Kmin),
-        K_max=int(args.Kmax),
-        K_step=int(args.Kstep),
-    )
-    deepc._eps_sigma = float(args.eps_sigma)
+    use_select_baseline = (not bool(args.d_gate)) and (not bool(args.cond_gate))
+    if use_select_baseline:
+        deepc = SelectDeePC(
+            controller_args,
+            selector_callback=LkSelector(order=2),
+            num_hankel_cols=int(args.K),
+            n_iter=int(args.n_iter),
+        )
+    else:
+        deepc = AdaptiveSelectDeePC(
+            controller_args,
+            selector_callback=AdaptiveLkSelector(order=2),
+            sigma_bar=float(args.sigma_bar),
+            N_loc=int(args.N_loc),
+            d_max=float(args.d_max),
+            num_hankel_cols=int(args.K),
+            n_iter=int(args.n_iter),
+            K_min=int(args.Kmin),
+            K_max=int(args.Kmax),
+            K_step=int(args.Kstep),
+            d_gate_enabled=bool(args.d_gate),
+            cond_gate_enabled=bool(args.cond_gate),
+        )
 
     scheduler = ReacherSetpointScheduler(
         env, controller_args.deepc_dims, num_extra_targets=int(args.num_extra_targets)
@@ -158,42 +241,61 @@ def main():
         ),
     )
 
-    target_xy = np.asarray(
-        scheduler._targets.targets[scheduler._target_idx], dtype=float
-    ).reshape(1, 2)
-    target_traj = np.repeat(target_xy, repeats=max(1, len(x_traj)), axis=0)
+    target_traj = replay_targets(
+        np.asarray(x_traj, dtype=float),
+        target_mode="setpoint",
+        num_extra_targets=int(args.num_extra_targets),
+        circle_center_x=0.03,
+        circle_center_y=0.06,
+        circle_radius=0.02,
+        circle_omega=0.05,
+        circle_phase=0.0,
+        circle_clip_y_max=0.09,
+    )
     err = compute_tracking_error(np.asarray(x_traj, dtype=float), target_traj)
     success = compute_success(err, eps=float(args.success_eps), window=int(args.success_window))
+    plot_xy_trajectory_with_goal(x_traj, target_traj, args.outdir)
 
     mode_tag = "adaptive" if args.adaptive_k else "fixed"
     out_npz = os.path.join(
         args.outdir,
         f"run_{mode_tag}_K{int(args.K):03d}_rho{float(args.rho):.3g}_seed{int(args.seed):03d}.npz",
     )
-    deepc.save_history_npz(
-        out_npz,
-        extra={
-            "seed": int(args.seed),
-            "K": int(args.K),
-            "adaptive_k": int(bool(args.adaptive_k)),
-            "rho": float(args.rho),
-            "total_cost": float(get_cost_dict(cost_obj).get("cost", np.nan)),
-            "rmse_ee": float(np.sqrt(safe_stat(err * err, np.mean, default=np.nan))),
-            "success": int(success),
-            "N_loc": int(args.N_loc),
-            "d_max": float(args.d_max),
-            "sigma_bar": float(args.sigma_bar),
-            "local_gate_fail": int(deepc._local_gate_fail),
-            "cond_gate_fail": int(deepc._cond_gate_fail),
-            "d_k_history": np.asarray(deepc._d_k_history, dtype=float),
-            "selected_idcs_history": np.array(deepc._selected_idcs_history, dtype=object),
-            "executed_state_traj": np.asarray(x_traj, dtype=float),
-            "tracking_error": np.asarray(err, dtype=float),
-            "K_opt_history": np.asarray(deepc._K_opt_history, dtype=int),
-        },
-    )
+    if hasattr(deepc, "save_history_npz"):
+        deepc.save_history_npz(
+            out_npz,
+            extra={
+                "seed": int(args.seed),
+                "K": int(args.K),
+                "total_cost": float(get_cost_dict(cost_obj).get("cost", np.nan)),
+                "rmse_ee": float(np.sqrt(safe_stat(err * err, np.mean, default=np.nan))),
+                "success": int(success),
+                "N_loc": int(args.N_loc),
+                "d_max": float(args.d_max),
+                "sigma_bar": float(args.sigma_bar),
+                "d_gate_flag": bool(args.d_gate),
+                "cond_gate_flag": bool(args.cond_gate),
+            },
+        )
+    else:
+        np.savez_compressed(
+            out_npz,
+            seed=int(args.seed),
+            K=int(args.K),
+            total_cost=float(get_cost_dict(cost_obj).get("cost", np.nan)),
+            rmse_ee=float(np.sqrt(safe_stat(err * err, np.mean, default=np.nan))),
+            success=int(success),
+            N_loc=int(args.N_loc),
+            d_max=float(args.d_max),
+            sigma_bar=float(args.sigma_bar),
+            d_gate_flag=bool(args.d_gate),
+            cond_gate_flag=bool(args.cond_gate),
+        )
 
-    K_opts=np.asarray(deepc._K_opt_history, dtype=int)
+    if hasattr(deepc, "_K_opt_history"):
+        K_opts = np.asarray(deepc._K_opt_history, dtype=int)
+    else:
+        K_opts = np.full(max(1, len(x_traj)), int(args.K), dtype=int)
     print(f"K_opts: {K_opts}")
     print(f"K_opts_mean: {np.mean(K_opts)}")
     print(f"K_opts_std: {np.std(K_opts)}")
@@ -205,17 +307,27 @@ def main():
         f"cost={get_cost_dict(cost_obj).get('cost', np.nan):.3e} "
         f"rmse={np.sqrt(safe_stat(err * err, np.mean, default=np.nan)):.3e} "
         f"success={int(success)} "
-        f"solve_ms={safe_stat(deepc.get_solve_time_ms_history(), np.mean):.2f}"
-        f"local_gate_fail={deepc._local_gate_fail} "
-        f"cond_gate_fail={deepc._cond_gate_fail} "
+        f"solve_ms={safe_stat(history_or_default(deepc, 'get_solve_time_ms_history', len(x_traj)), np.mean):.2f}"
+        f"local_gate_fail={int(getattr(deepc, '_local_gate_fail', 0))} "
+        f"cond_gate_fail={int(getattr(deepc, '_cond_gate_fail', 0))} "
     )
     import matplotlib.pyplot as plt
 
-    sigma_min_mk = np.asarray(deepc.get_sigma_min_Mk_history(), dtype=float).reshape(-1)
-    solve_time_ms = np.asarray(deepc.get_solve_time_ms_history(), dtype=float).reshape(-1)
-    slack_norm_inf = np.asarray(deepc.get_slack_norm_inf_history(), dtype=float).reshape(-1)
-    slack_violation = np.asarray(deepc.get_slack_violation_history(), dtype=float).reshape(-1)
-    input_hist = np.asarray(deepc.get_input_history(), dtype=float)
+    sigma_min_mk = np.asarray(
+        history_or_default(deepc, "get_sigma_min_Mk_history", len(x_traj)), dtype=float
+    ).reshape(-1)
+    solve_time_ms = np.asarray(
+        history_or_default(deepc, "get_solve_time_ms_history", len(x_traj)), dtype=float
+    ).reshape(-1)
+    slack_norm_inf = np.asarray(
+        history_or_default(deepc, "get_slack_norm_inf_history", len(x_traj)), dtype=float
+    ).reshape(-1)
+    slack_violation = np.asarray(
+        history_or_default(deepc, "get_slack_violation_history", len(x_traj), default=0.0), dtype=float
+    ).reshape(-1)
+    input_hist = np.asarray(
+        history_or_default(deepc, "get_input_history", len(x_traj), default=0.0), dtype=float
+    )
     if input_hist.ndim == 1:
         input_hist = input_hist.reshape(-1, 1)
 
@@ -227,7 +339,10 @@ def main():
     elif k_opts_plot.size > n_step:
         k_opts_plot = k_opts_plot[:n_step]
 
-    status_raw = np.asarray(deepc.get_status_history(), dtype=object).reshape(-1)
+    status_raw = np.asarray(
+        history_or_default(deepc, "get_status_history", len(x_traj), default="unknown", dtype=object),
+        dtype=object,
+    ).reshape(-1)
     if status_raw.size > n_step:
         status_raw = status_raw[:n_step]
     if status_raw.size > 0 and isinstance(status_raw[0], str):

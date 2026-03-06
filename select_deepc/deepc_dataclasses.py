@@ -1,6 +1,6 @@
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-from typing import Any, List
+from typing import Any, Dict, List
 
 import numpy as np
 from numpy.typing import NDArray
@@ -100,7 +100,7 @@ class DeePCControllerArgs:
     input_reference: np.array
     verbose: bool
 
-    def get_logging(self) -> dict[str, Any]:
+    def get_logging(self) -> Dict[str, Any]:
         return {
             "dataset_name": self.trajectory_data.dataset_name,
             **self.deepc_dims.get_dict(),

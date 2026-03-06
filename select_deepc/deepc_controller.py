@@ -340,6 +340,20 @@ class DataDrivenPredictiveController(BaseController):
                 )
                 computed_action = np.zeros(self._m)
 
+        # Guard against shape corruption in fallback mode:
+        # slicing an exhausted open-loop plan can return an empty array
+        # without raising, which later breaks _u_past dimension constraints.
+        computed_action = np.asarray(computed_action, dtype=float).reshape(-1)
+        if computed_action.size != self._m:
+            warnings.warn(
+                (
+                    "Fallback action has invalid size "
+                    f"{computed_action.size} (expected {self._m}); sending 0 input."
+                ),
+                RuntimeWarning,
+            )
+            computed_action = np.zeros(self._m, dtype=float)
+
         # Residual logging: primal equality residuals and a practical KKT proxy.
         if self._g.value is not None:
             g_val = np.asarray(self._g.value, dtype=float).reshape(-1)
@@ -680,6 +694,7 @@ class SelectDeePC(BaseController):
                 self._H_y,
                 reference,
             )
+            idcs_ranked = np.asarray(idcs, dtype=int).reshape(-1)
             time_after_sel = perf_counter()
 
             idcs = idcs[: self._num_hankel_cols]
@@ -727,6 +742,8 @@ class SelectDeePC(BaseController):
         self._u_past = np.append(self._u_past[self._dims.m :], action)
         return action
 
+    
+
     def get_min_selected_singular_values(self):
         return np.array(self._min_selected_sigma_history, dtype=float)
 
@@ -761,10 +778,10 @@ class AdaptiveSelectDeePC(BaseController):
         K_max: int = 200,
         K_step: int = 10,
         sigma_bar: float = 1e-6,
-        rho: float = 0.1,
-        gamma_min: float = 1e-6,
         N_loc: int = 1000,
         d_max: float = 10.0,
+        d_gate_enabled: bool = True,
+        cond_gate_enabled: bool = True,
     ):
         self._debug = debug
         self._T_past = deepc_args.deepc_dims.T_past
@@ -847,8 +864,6 @@ class AdaptiveSelectDeePC(BaseController):
         self._K_min = K_min
         self._K_max = K_max
         self._K_step = K_step
-        self._rho = rho
-        self._gamma_min = gamma_min
         
 
         # Respect constructor arguments instead of hard-coded defaults.
@@ -859,38 +874,17 @@ class AdaptiveSelectDeePC(BaseController):
         self._sigma_bar = sigma_bar
         self._d_k_history = []
         self._sigma_min_all = None
-
+        self._last_cand = None
+        self._d_gate_enabled = d_gate_enabled
+        self._cond_gate_enabled = cond_gate_enabled
+        self._gate_enabled = d_gate_enabled or cond_gate_enabled
         # Fixed-K mode should honor num_hankel_cols directly.
     
         self._A_g = np.vstack([self._H_u, self._H_y[: self._dims.p * self._T_past, :]])
-        try:
-            singular_values_A_g_offline = np.linalg.svd(self._A_g, compute_uv=False)
-            self._sigma_ref_Ag = float(np.min(singular_values_A_g_offline))
-        except np.linalg.LinAlgError:
-            warnings.warn(
-                "SelectDeePC: offline A_g SVD did not converge, falling back to gamma_min.",
-                RuntimeWarning,
-            )
-            self._sigma_ref_Ag = float(self._gamma_min)
-        try:
-            singular_values_H_u_offline = np.linalg.svd(self._H_u, compute_uv=False)
-            self._sigma_ref_H_u = float(np.min(singular_values_H_u_offline))
-        except np.linalg.LinAlgError:
-            warnings.warn(
-                "SelectDeePC: offline A_g SVD did not converge, falling back to gamma_min.",
-                RuntimeWarning,
-            )
-            self._sigma_ref_H_u = float(self._gamma_min)
 
-
-        
 
     def compute_action(self, state, reference):
         step_min_sigma = np.nan
-
-        once=True
-
-
         for curr_iter in range(self._n_iter):
             if self._deepc is None:
                 self._y_past = np.tile(state, self._T_past)
@@ -915,15 +909,13 @@ class AdaptiveSelectDeePC(BaseController):
                 self._H_y,
                 reference,
             )
+            idcs_ranked = np.asarray(idcs, dtype=int).reshape(-1)
             time_after_sel = perf_counter()
-
-            # after: idcs, norms = self._selector_callback(...)
-            if not hasattr(self, "_ranked_idcs_history"):
-                self._ranked_idcs_history = []
-                self._ranked_norms_history = []
-            self._ranked_idcs_history.append(np.array(idcs, dtype=int))
-            self._ranked_norms_history.append(np.array(norms, dtype=float))
-
+            
+            #debug
+            print(np.min(norms), np.median(norms), np.max(norms))
+            print(np.percentile(norms, [1,5,10,50,90,99]))
+            
             N_loc=self._N_loc
             d_max=self._d_max
             m = self._dims.m
@@ -934,44 +926,61 @@ class AdaptiveSelectDeePC(BaseController):
             u_tot_rows = m * (Tp + Tf)
             Up_all = self._H_u[:u_ini_rows, :]               # (mTp, N)
             Uf_all = self._H_u[u_ini_rows:u_tot_rows, :]     # (mTf, N)
-  
-                        
-            # ---- d-gate ----
-            cand = idcs[:N_loc]
-            d_k = norms[cand].max()
-            if d_k > d_max:
-                self._local_gate_fail += 1
-                # 최소 fallback: 후보 풀을 넓혀서라도 시도 
-                cand = idcs[:min(idcs.size, 3*N_loc)]
-            self._d_k_history.append(float(d_k))
-            # ---- CPQR + sigma-gate: minimal subset ----
-            S, sig_actual, s_k, fail = self.cpqr_sigma_gate(
-                cand=cand,
-                Up_all=Up_all,
-                Uf_all=Uf_all,
-                sigma_bar=self._sigma_bar,   # = underline_sigma
-                K_min=self._K_min,
-                K_max=min(self._K_max, cand.size),
-            )
-
-            if fail:
-                self._cond_gate_fail += 1
-                # 정책: bank update / sigma_bar 완화 / N_loc 확대
-                # 일단은 fallback으로 top-K 사용(혹은 bank update)
-                idcs = cand[:self._num_hankel_cols]
-            else:
-                idcs = S
-                self._sigma_min_A_history.append(sig_actual)
 
             if self._sigma_min_all is None:
                 Mk=np.vstack([Up_all, Uf_all])
                 sigma_min_all=self._sigma_min_matrix(Mk)
                 self._sigma_min_all=sigma_min_all
+
+
+            if self._d_gate_enabled and self._cond_gate_enabled:
+                cand= idcs[norms[idcs] <= d_max]
+                if cand.size <self._K_min:
+                    cand = idcs[:self._K_min]
+                    self._local_gate_fail += 1
             
-            
-            # if once:
-            #     print(f"step_min_sigma_Mk: {step_min_sigma_Mk}")
-            #     once=False
+                S,sig_actual,s_k,fail = self.cpqr_sigma_gate(
+                    cand=cand,
+                    Up_all=Up_all,
+                    Uf_all=Uf_all,
+                    sigma_bar=self._sigma_bar,
+                    K_min=self._K_min,
+                    K_max=min(self._K_max, cand.size),
+                )
+                if fail:
+                    self._cond_gate_fail += 1
+                    # 정책: bank update / sigma_bar 완화 / N_loc 확대
+                    # 일단은 fallback으로 K_max 사용(혹은 bank update)
+                idcs = S
+                self._last_selected_idcs = idcs.copy()
+            elif self._d_gate_enabled and not self._cond_gate_enabled:
+                cand = idcs[norms[idcs] <= d_max]
+                if cand.size <self._K_min:
+                    cand = idcs[:self._K_min]
+                    local_gate_fail += 1
+                idcs = cand
+                self._last_selected_idcs = idcs.copy()    
+            elif not self._d_gate_enabled and self._cond_gate_enabled:
+                cand = idcs[:self._K_max]
+                S,sig_actual,s_k,fail = self.cpqr_sigma_gate(
+                    cand=cand,
+                    Up_all=Up_all,
+                    Uf_all=Uf_all,
+                    sigma_bar=self._sigma_bar,
+                    K_min=self._K_min,
+                    K_max=min(self._K_max, cand.size),
+                )
+                if fail:    
+                    self._cond_gate_fail += 1
+                    # 정책: bank update / sigma_bar 완화 / N_loc 확대
+                    # 일단은 fallback으로 K_max 사용(혹은 bank update)
+                idcs = S
+                self._last_selected_idcs = idcs.copy()
+            elif not self._d_gate_enabled and not self._cond_gate_enabled:
+                idcs = idcs[:self._num_hankel_cols]
+                self._last_selected_idcs = idcs.copy()
+     
+           
             Mk_sel = np.vstack([Up_all[:, idcs], Uf_all[:, idcs]])
             sigma_min_Mk_selected = self._sigma_min_matrix(Mk_sel)
             self._sigma_min_Mk_history.append(sigma_min_Mk_selected)
@@ -980,71 +989,11 @@ class AdaptiveSelectDeePC(BaseController):
             self._K_opt_history.append(idcs.size)
             #####----#####
             
-            # #custom
-            # idcs_ranked=idcs
-            # if self._adaptive_k:
-            #     idcs, K_opt, sigma_ref, sigma_opt = self._adaptive_k_selector(idcs_ranked)
-            #     self._K_opt_history.append(K_opt)
-            # else:
-            #     idcs = idcs[:self._num_hankel_cols]
-            #     self._K_opt_history.append(idcs.size)
-            # #####----#####
-            
-            # self._last_selected_idcs = idcs.copy()
-            # if idcs.size > 0:
-            #     singular_values = np.linalg.svd(self._H_u[:, idcs], compute_uv=False)
-            #     step_min_sigma = float(np.min(singular_values))
-
-            # #####----#####
-            # #custom 
-            # self._selected_idcs_history.append(idcs)
-             
-            
-            # u_ini_rows = m * Tp
-            # u_tot_rows = m * (Tp+ Tf)
-            # y_ini_rows = p * Tp
-            # y_tot_rows = p * (Tp+Tf)
-            # U_ini_selected = self._H_u[:u_ini_rows, idcs]          # U_p
-            # U_fut_selected = self._H_u[u_ini_rows:u_tot_rows, idcs] # U_f
-            # Y_ini_selected = self._H_y[:y_ini_rows, idcs]          # Y_p
-            # # debugging..
-            # # U_ini_selected, U_fut_selected, Y_ini_selected 슬라이싱 인덱싱이 잘 되었는지 확인
-            # # 세 부분을 다시 vstack (원래 H_u, H_y의 선택된 열과 비교)
-            # U_sel_reconstructed = np.vstack([U_ini_selected, U_fut_selected])
-            # Y_sel_reconstructed = Y_ini_selected  # Y는 Y_p 만 사용했으므로 비교는 아래와 같이
-            # H_u_sel = self._H_u[:, idcs]
-            # H_y_sel = self._H_y[:, idcs]
-            
-            # check_u = np.allclose(U_sel_reconstructed, H_u_sel)
-            # check_y = np.allclose(Y_sel_reconstructed, H_y_sel[:y_ini_rows, :])
-
-            # if not (check_u and check_y):
-            #     print(
-            #         f"[sanity check] U 재조합 일치 여부: {check_u}, Y 재조합 일치 여부: {check_y} "
-            #         f"U_sel_reconstructed.shape={U_sel_reconstructed.shape}, H_u_sel.shape={H_u_sel.shape}, "
-            #         f"Y_sel_reconstructed.shape={Y_sel_reconstructed.shape}, H_y_sel.shape={H_y_sel.shape}"
-            #     )
-            
-            # #A=np.block(
-            # #    [
-            # #        [U_ini_selected, np.zeros(U_ini_selected.shape[0],self._m * (self._T_past + self._T_fut)), np.zeros(U_ini_selected.shape[0],self._p * (self._T_past))]
-            # #        [Y_ini_selected, np.zeros(Y_ini_selected.shape[0], self._m * (self._T_past + self._T_fut)), np.eyes(self._p * (self._T_past))]
-            # #        [Y_fut_selected, -np.eye(self._m * (self._T_past + self._T_fut)), np.zeros(self._m * (self._T_past + self._T_fut),self._p*self._T_past)]
-            # #    ]
-            # #)
-            # A_g=np.vstack(
-            #     [
-            #         U_ini_selected,
-            #         Y_ini_selected,
-            #         U_fut_selected,
-            #     ]
-            # )
-            # sigular_values_A_g=np.linalg.svd(A_g, compute_uv=False)
-            # step_min_sigma_A_g = float(np.min(sigular_values_A_g))
-            # self._sigma_min_A_history.append(step_min_sigma_A_g)
-
             # #####----#####
 
+            if idcs.size > 0:
+                singular_values = np.linalg.svd(self._H_u[:, idcs], compute_uv=False)
+                step_min_sigma = float(np.min(singular_values))
 
             prev_u = None
             if self._deepc is not None:
@@ -1090,20 +1039,12 @@ class AdaptiveSelectDeePC(BaseController):
         slack_inf = float(self._deepc.get_last_slack_inf())
         self._slack_norm_inf_history.append(slack_inf)
         eps = self._eps_sigma# 미리 클래스에 저장해둔 threshold
-        self._slack_violation_history.append(int(slack_inf > eps))
 
         tracking_cost = float(self._deepc.get_tracking_cost())
         input_cost = float(self._deepc.get_input_cost())
         self._tracking_cost_history.append(tracking_cost)
-        self._input_cost_history.append(input_cost)
-        self._stage_cost_history.append(tracking_cost + input_cost)
         self._solve_time_ms_history.append(1000.0*(time_after_solve - time_before_solve))
         self._status_history.append(self._deepc.get_last_solver_status())
-        self._eq_residual_history.append(float(self._deepc.get_last_eq_residual()))
-        self._eq_res_u_past_history.append(float(self._deepc.get_last_eq_residual_u_past()))
-        self._eq_res_y_past_history.append(float(self._deepc.get_last_eq_residual_y_past()))
-        self._eq_res_u_fut_history.append(float(self._deepc.get_last_eq_residual_u_fut()))
-        self._kkt_residual_history.append(float(self._deepc.get_last_kkt_residual()))
         self._input_history.append(action)
 
         ####-----####
@@ -1135,7 +1076,7 @@ class AdaptiveSelectDeePC(BaseController):
         Up_all: np.ndarray,
         Uf_all: np.ndarray,
         sigma_bar: float,
-        K_min: int = 20,
+        K_min: int = 40,
         K_max: int | None = None,
     ) -> tuple[np.ndarray | None, float, int, bool]:
         """
@@ -1158,12 +1099,13 @@ class AdaptiveSelectDeePC(BaseController):
         for s in range(max(1, K_min), K_max + 1):
             S = cand[piv[:s]]
             sig = self._sigma_min_matrix(np.vstack([Up_all[:, S], Uf_all[:, S]]))
-            if np.isfinite(sig) and sig >= sigma_bar:
+            if np.isfinite(sig) and sig >= sigma_bar*self._sigma_min_all:
                 return S, sig, s, False
 
         # fail
         sig_last = self._sigma_min_matrix(np.vstack([Up_all[:, cand[piv[:K_max]]], Uf_all[:, cand[piv[:K_max]]]]))
-        return None, sig_last, K_max, True
+        S_last=cand[piv[:K_max]]
+        return S_last, sig_last, K_max, True
 
     def _adaptive_k_selector(self, idcs: np.ndarray) -> Tuple[np.ndarray, int, float, float]:
         L = int(idcs.size)

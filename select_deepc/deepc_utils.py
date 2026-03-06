@@ -2,6 +2,7 @@ import base64
 import glob
 import io
 import os
+import warnings
 from abc import ABC
 from copy import deepcopy
 from time import perf_counter
@@ -224,8 +225,35 @@ def get_reacher_simulator(
     num_steps=100,
     video_folder: str = os.path.join("video", "reacher"),
     video_title: str = "experiment",
+    record_video: bool = True,
+    render_mode: Optional[str] = "rgb_array",
+    force_headless_video: bool = False,
 ):
     from gymnasium.envs.registration import register
+
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if record_video and (not has_display) and (not force_headless_video):
+        warnings.warn(
+            (
+                "No display server found; disabling MuJoCo video recording. "
+                "Pass force_headless_video=True to attempt EGL recording."
+            ),
+            RuntimeWarning,
+        )
+        record_video = False
+        render_mode = None
+
+    if not record_video:
+        render_mode = None
+
+    # MuJoCo import can crash in headless shells if inherited MUJOCO_GL=osmesa.
+    # Prefer EGL by default unless user explicitly set another backend.
+    gl_backend = os.environ.get("MUJOCO_GL", "").strip().lower()
+    if gl_backend in ("", "osmesa"):
+        os.environ["MUJOCO_GL"] = "egl"
+    pyopengl_backend = os.environ.get("PYOPENGL_PLATFORM", "").strip().lower()
+    if pyopengl_backend in ("", "osmesa"):
+        os.environ["PYOPENGL_PLATFORM"] = "egl"
 
     register(
         id="Reacher-v4-custom",
@@ -233,16 +261,14 @@ def get_reacher_simulator(
         max_episode_steps=num_steps,
         reward_threshold=-3.75,
     )
-    env = gym.make(
-        "Reacher-v4-custom",
-        render_mode="rgb_array",
-    )
-    env = gym.wrappers.RecordVideo(
-        env,
-        video_folder=video_folder,
-        episode_trigger=lambda x: True,
-        name_prefix=video_title,
-    )
+    env = gym.make("Reacher-v4-custom", render_mode=render_mode)
+    if record_video:
+        env = gym.wrappers.RecordVideo(
+            env,
+            video_folder=video_folder,
+            episode_trigger=lambda x: True,
+            name_prefix=video_title,
+        )
     return env
 
 
@@ -482,6 +508,107 @@ def run_reacher_simulator(
         controller._solve_time_avg,
     )
 
+def run_reacher_simulator_measurement_noise(
+    env: gym.Env,
+    controller: BaseController,
+    setpoint_scheduler: SetPointScheduler = None,
+    seed=0,
+    deepc_cost_accumulator: Optional[PerformanceAccumulator] = None,
+    noise_std: float = 0.1,
+):
+    """Runs the simulation for a given env and controller"""
+    controller_state_trajectory = []
+    controller_input_trajectory = []
+
+    can_get_planned_trajectories = hasattr(
+        controller, "get_planned_state_trajectory"
+    ) and hasattr(controller, "get_planned_input_trajectory")
+
+    controller_state_predictions = [] if can_get_planned_trajectories else None
+    controller_input_predictions = [] if can_get_planned_trajectories else None
+
+    simulation_iteration = 0
+    obs, info = env.reset(seed=seed)  # specify a random seed for consistency
+
+    controller_execution_times = []
+
+    # simulate
+    while True:
+
+        if setpoint_scheduler is not None:
+            controller_reference = setpoint_scheduler(obs, env=env)
+        else:
+            assert False
+
+        # get action
+        time_start = perf_counter()
+        obs_transformed = obs.copy()
+        obs_transformed[4:6] += obs[8:10]
+        obs_transformed = obs_transformed[[0, 1, 2, 3, 4, 5, 6, 7]]
+        #insert measurement noise
+        obs_transformed += np.random.normal(0.0, noise_std, size=obs_transformed.shape) # noise level 0.1
+        action = controller.compute_action(obs_transformed, controller_reference)
+        time_stop = perf_counter()
+        controller_execution_times.append(time_stop - time_start)
+
+        if simulation_iteration % 5 == 0 and can_get_planned_trajectories:
+            controller_state_predictions.append(
+                controller.get_planned_state_trajectory()
+            )
+            controller_input_predictions.append(
+                controller.get_planned_input_trajectory()
+            )
+
+        controller_state_trajectory.append(obs)
+        controller_input_trajectory.append(action)
+
+        simulation_iteration += 1
+
+        if deepc_cost_accumulator is not None:
+            deepc_cost_accumulator.update_cost(
+                obs_transformed, controller_reference, action
+            )
+
+        if action is None:
+            print("none action:((")
+            break
+
+        next_obs, _, done, truncated, info = env.step(action)
+
+        # check if simulation ended
+        if done or truncated:
+            print(f"Simulation is done {done} and truncated {truncated}")
+            print(f"info:\n{info}")
+            if (
+                not setpoint_scheduler.is_successful(next_obs)
+                and deepc_cost_accumulator is not None
+            ):
+                deepc_cost_accumulator.cost = np.inf
+            break
+
+        # update observation
+        obs = next_obs
+
+    env.close()  # video saved at this step
+
+    controller_execution_times = 1000 * np.array(controller_execution_times)
+    print(
+        f"Average controller execution time: {np.mean(controller_execution_times)}ms, std: {np.std(controller_execution_times)}ms"
+    )
+
+    controller_state_predictions = np.array(controller_state_predictions)
+    controller_input_predictions = np.array(controller_input_predictions)
+    controller_state_trajectory = np.array(controller_state_trajectory)
+    controller_input_trajectory = np.array(controller_input_trajectory)
+
+    return (
+        controller_state_trajectory,
+        controller_input_trajectory,
+        controller_state_predictions,
+        controller_input_predictions,
+        deepc_cost_accumulator.cost if deepc_cost_accumulator is not None else np.nan,
+        controller._solve_time_avg,
+    )
 
 
 def run_reacher_simulator_sensitivity_analysis(

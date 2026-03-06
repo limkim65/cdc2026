@@ -98,7 +98,8 @@ def load_runs(logdir):
                 "sigma_mk_min": float(np.nanmin(sigma_mk)) if sigma_mk.size else np.nan,
                 "cost": cost,
                 "solve_mean": float(np.nanmean(solve)) if solve.size else np.nan,
-                "K_opt_mean": float(np.nanmean(kopt)) if kopt.size else np.nan,
+                # fixed-k runs may not store K_opt history; fall back to commanded K
+                "K_opt_mean": float(np.nanmean(kopt)) if kopt.size else float(K),
                 "rmse": rmse,
                 "ISE": ise,
                 "IAE": iae,

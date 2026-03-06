@@ -146,6 +146,11 @@ def main():
     parser.add_argument("--N_loc", type=int, default=1000)
     parser.add_argument("--d_max", type=float, default=10.0)
     parser.add_argument("--sigma_bar", type=float, default=1e-6)
+    parser.add_argument(
+        "--record_video",
+        action="store_true",
+        help="Enable video recording (requires working MuJoCo OpenGL backend).",
+    )
 
     parser.add_argument(
         "--outdir",
@@ -217,7 +222,6 @@ def main():
     )
 
    
-    
     sigma_bar_list = list(np.arange(0.1, 1.0, 0.1))
     seedlist = [0]
     results = []
@@ -230,6 +234,8 @@ def main():
                 num_steps=int(args.max_steps),
                 video_folder=os.path.join(args.outdir, "video"),
                 video_title="reacher_run",
+                record_video=bool(args.record_video),
+                render_mode="rgb_array" if bool(args.record_video) else None,
             )
 
             deepc = AdaptiveSelectDeePC(
@@ -238,7 +244,9 @@ def main():
                 sigma_bar=sigma_bar,
                 N_loc=int(args.N_loc),
                 d_max=float(args.d_max),
-                n_iter=1
+                n_iter=1,
+                d_gate_enabled=False,
+                cond_gate_enabled=True,
             )
             deepc._eps_sigma = float(args.eps_sigma)
 
@@ -265,13 +273,14 @@ def main():
 
             out_npz = os.path.join(
                 args.outdir,
-                f"run_fixedk_K{int(k):03d}_seed{int(seed):03d}.npz",
+                f"run_sigma_bar_sweep_{float(sigma_bar):.3f}_seed{int(seed):03d}.npz",
             )
             deepc.save_history_npz(
                 out_npz,
                 extra={
                     "seed": int(seed),
-                    "K": int(k),
+                    "K": int(args.K),
+                    "sigma_bar": float(sigma_bar),
                     "sigma_min_Mk":np.asarray(deepc.get_sigma_min_Mk_history(), dtype=float).reshape(-1),
                     "sigma_min_all":deepc.get_sigma_min_all(),
                     "total_cost": float(get_cost_dict(cost_obj).get("cost", np.nan)),
@@ -292,7 +301,8 @@ def main():
             )
             results.append({
                 "seed": int(seed),
-                    "K": int(k),
+                    "K": int(args.K),
+                    "sigma_bar": float(sigma_bar),
                     "sigma_min_Mk":np.asarray(deepc.get_sigma_min_Mk_history(), dtype=float).reshape(-1),
                     "sigma_min_all":deepc.get_sigma_min_all(),
                     "total_cost": float(get_cost_dict(cost_obj).get("cost", np.nan)),

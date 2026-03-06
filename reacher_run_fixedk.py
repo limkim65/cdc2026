@@ -3,6 +3,7 @@ import os
 import sys
 
 import numpy as np
+import pandas as pd
 
 
 REPO_ROOT = os.path.abspath(os.path.dirname(__file__))
@@ -21,6 +22,7 @@ from experiments.reacher.run_cdc_reacher_benchmark import (  # noqa: E402
 from select_deepc.data_selectors import LkSelector  # noqa: E402
 from select_deepc.data_selectors import AdaptiveLkSelector  # noqa: E402
 from select_deepc.deepc_controller import SelectDeePC  # noqa: E402
+from select_deepc.deepc_controller import AdaptiveSelectDeePC  # noqa: E402
 from select_deepc.deepc_dataclasses import DeePCControllerArgs, DeePCDims, DeePCConstraints, DeePCCost
 from select_deepc.deepc_utils import (  # noqa: E402
     DeePCCostAccumulator,
@@ -33,139 +35,53 @@ from select_deepc.deepc_utils import (  # noqa: E402
 )
 
 
-def safe_stat(values, fn, default=np.nan):
-    arr = np.asarray(values, dtype=float).reshape(-1)
-    if arr.size == 0:
-        return float(default)
-    arr = arr[np.isfinite(arr)]
-    if arr.size == 0:
-        return float(default)
-    return float(fn(arr))
 
 
-def plot_results(results, outdir):
-    import matplotlib.pyplot as plt
-
-    if len(results) == 0:
-        print("No results to plot.")
-        return
-
-    ks = np.array([r["K"] for r in results], dtype=int)
-    total_costs = np.array([r["total_cost"] for r in results], dtype=float)
-    rmse_ee = np.array([r["rmse_ee"] for r in results], dtype=float)
-    solve_time_ms = np.array(
-        [
-            np.mean(r["solve_time_ms"]) if np.size(r["solve_time_ms"]) > 0 else np.nan
-            for r in results
-        ],
-        dtype=float,
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run fixed-k Select-DeePC sweep.")
+    parser.add_argument("--outdir", type=str, default="logs/reacher/fixed_k")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="iid",
+        choices=["iid", "random_walk", "mixed"],
     )
-    ises = np.array([r["ISE"] for r in results], dtype=float)
-    iaes = np.array([r["IAE"] for r in results], dtype=float)
-
-    def stochastic_plot(x, y, xlabel, ylabel, title, ax=None):
-        ax = ax if ax is not None else plt.gca()
-        uniq_k = np.unique(x)
-        y_per_k = [y[x == k] for k in uniq_k]
-
-        ax.violinplot(y_per_k, positions=uniq_k, showmedians=True)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3)
-
-        for i, k in enumerate(uniq_k):
-            jitter = np.random.normal(loc=0.0, scale=0.07, size=len(y_per_k[i]))
-            ax.scatter(
-                np.ones_like(y_per_k[i]) * k + jitter,
-                y_per_k[i],
-                alpha=0.6,
-                s=12,
-                color="tab:blue",
-                edgecolor="gray",
-            )
-
-    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-    fig.suptitle("Stochastic Visualization of Results (per K over Seeds)")
-
-    stochastic_plot(ks, total_costs, "K", "Total Cost", "Total Cost vs K", ax=axs[0, 0])
-    stochastic_plot(ks, rmse_ee, "K", "RMSE (end-effector)", "RMSE vs K", ax=axs[0, 1])
-    stochastic_plot(ks, solve_time_ms, "K", "Solve Time (ms)", "Solve Time vs K", ax=axs[1, 0])
-
-    uniq_k = np.unique(ks)
-    for name, arr, color in [("ISE", ises, "tab:olive"), ("IAE", iaes, "tab:orange")]:
-        y_grouped = [arr[ks == k] for k in uniq_k]
-        parts = axs[1, 1].violinplot(
-            y_grouped, positions=uniq_k, showmeans=False, showmedians=True, widths=0.7
-        )
-        for pc in parts["bodies"]:
-            pc.set_facecolor(color)
-            pc.set_alpha(0.3 if name == "IAE" else 0.6)
-        axs[1, 1].scatter(
-            uniq_k,
-            [np.median(g) for g in y_grouped],
-            label=f"{name} median",
-            color=color,
-            marker="o",
-            alpha=0.9,
-        )
-
-    axs[1, 1].set_xlabel("K")
-    axs[1, 1].set_ylabel("Metric Value")
-    axs[1, 1].set_title("ISE & IAE vs K (Stochastic)")
-    axs[1, 1].legend()
-    axs[1, 1].grid(True, alpha=0.3)
-
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    out_png = os.path.join(outdir, "fixedk_stochastic_summary.png")
-    plt.savefig(out_png, dpi=180)
-    plt.show()
-    print(f"Saved plot: {out_png}")
+    parser.add_argument("--max_steps", type=int, default=100)
+    parser.add_argument("--seedlist", type=int, nargs="*", default=[0, 1, 2, 3, 4])
+    parser.add_argument("--k_start", type=int, default=10)
+    parser.add_argument("--k_stop", type=int, default=100)
+    parser.add_argument("--k_step", type=int, default=10)
+    parser.add_argument("--record_video", action="store_true")
+    parser.add_argument("--enable_measurement_constraint", action="store_true")
+    parser.add_argument("--num_extra_targets", type=int, default=0)
+    return parser.parse_args()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Simple Reacher runner.")
-    
-    parser.add_argument("--dataset", choices=["iid", "random_walk", "both"], default="iid")
-    parser.add_argument("--max_steps", type=int, default=200)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--K", type=int, default=80, help="Fixed K, or initial K for adaptive.")
-    parser.add_argument("--n_iter", type=int, default=1)
-    parser.add_argument("--adaptive_k", action="store_true")
-    parser.add_argument("--rho", type=float, default=0.3)
-    parser.add_argument("--Kmin", type=int, default=40)
-    parser.add_argument("--Kmax", type=int, default=320)
-    parser.add_argument("--Kstep", type=int, default=1)
-    parser.add_argument("--gamma_min", type=float, default=1e-6)
-    parser.add_argument("--eps_sigma", type=float, default=1e-3)
-    parser.add_argument("--success_eps", type=float, default=0.01)
-    parser.add_argument("--success_window", type=int, default=20)
-    parser.add_argument("--num_extra_targets", type=int, default=0)
-    parser.add_argument("--enable_measurement_constraint", action="store_true")
-    parser.add_argument("--N_loc", type=int, default=1000)
-    parser.add_argument("--d_max", type=float, default=10.0)
-    parser.add_argument("--sigma_bar", type=float, default=1e-6)
+    args = parse_args()
 
-    parser.add_argument(
-        "--outdir",
-        type=str,
-        default=os.path.join("logs", "reacher", "fixed_k", "dataset_%s" % ("{dataset}")),
-    )
-
-    args = parser.parse_args()
+    outdir = str(args.outdir)
+    dataset = str(args.dataset)
+    max_steps = int(args.max_steps)
+    seedlist = list(args.seedlist)
+    klist = list(range(int(args.k_start), int(args.k_stop), int(args.k_step)))
+    record_video = bool(args.record_video)
+    enable_measurement_constraint = bool(args.enable_measurement_constraint)
+    results = []
+    num_extra_targets = int(args.num_extra_targets)
 
     # Resolve dataset-aware output directory.
     # 1) If user passed a template path containing "{dataset}", format it.
     # 2) Otherwise append "dataset_<name>" once.
-    if "{dataset}" in args.outdir:
-        args.outdir = args.outdir.format(dataset=args.dataset)
+    if "{dataset}" in outdir:
+        outdir = outdir.format(dataset=dataset)
     else:
-        dataset_tag = f"dataset_{args.dataset}"
-        norm_tail = os.path.basename(os.path.normpath(args.outdir))
+        dataset_tag = f"dataset_{dataset}"
+        norm_tail = os.path.basename(os.path.normpath(outdir))
         if norm_tail != dataset_tag:
-            args.outdir = os.path.join(args.outdir, dataset_tag)
+            outdir = os.path.join(outdir, dataset_tag)
 
-    os.makedirs(args.outdir, exist_ok=True)
+    os.makedirs(outdir, exist_ok=True)
 
     iid = load_data_from_folder(os.path.join(REPO_ROOT, "data", "reacher", "dataset_iid"), "iid")
     rw = load_data_from_folder(
@@ -174,9 +90,9 @@ def main():
     for ds in [iid, rw]:
         fix_dataset(ds)
 
-    if args.dataset == "iid":
+    if dataset == "iid":
         data = iid
-    elif args.dataset == "random_walk":
+    elif dataset == "random_walk":
         data = rw
     else:
         data = iid + rw
@@ -184,7 +100,7 @@ def main():
     #deepc arguments setup
     p = 8
     m = 2
-    n = 75
+    n = 75 # estimated model size
     t_past = 2
     t_fut = 15
     t_hankel = (m + 1) * (t_past + t_fut) + n - 1
@@ -193,8 +109,9 @@ def main():
     r = np.diag([10, 10])
     # controller_costs = DeePCCost(q, r, 5000000.0, 10.0, 10000.0)
     controller_costs = DeePCCost(q, r, 5000000.0, 10.0, 0.0)
-    enable_measurement_constraint=bool(args.enable_measurement_constraint)
+    enable_measurement_constraint=bool(enable_measurement_constraint)
 
+    #controller constraints setup
     a_u = np.array([[1, 0], [-1, 0], [0, 1], [0, -1]])
     b_u = np.array([0.5, 0.5, 0.5, 0.5])
     a_y = None
@@ -216,28 +133,26 @@ def main():
     )
 
    
-    env = get_reacher_simulator(
-        num_steps=int(args.max_steps),
-        video_folder=os.path.join(args.outdir, "video"),
-        video_title="reacher_run",
-    )
-
-    klist = list(range(10, 60, 5))
-    seedlist = [0, 1, 2, 3, 4]
-    results = []
-
     for seed in seedlist:
         for k in klist:
-            deepc = SelectDeePC(
+            env = get_reacher_simulator(
+                num_steps=int(max_steps),
+                video_folder=os.path.join(outdir, "video"),
+                video_title="reacher_run",
+                record_video=bool(record_video),
+                render_mode="rgb_array" if bool(record_video) else None,
+            )
+            deepc = AdaptiveSelectDeePC(
                 controller_args,
                 selector_callback=LkSelector(order=2),
                 num_hankel_cols=int(k),
-                n_iter=1
+                n_iter=1,
+                d_gate_enabled=False,
+                cond_gate_enabled=False                
             )
-            deepc._eps_sigma = float(args.eps_sigma)
 
             scheduler = ReacherSetpointScheduler(
-                env, controller_args.deepc_dims, num_extra_targets=int(args.num_extra_targets)
+                env, controller_args.deepc_dims, num_extra_targets=int(num_extra_targets)
             )
             x_traj, u_traj, _, _, cost_obj, _ = run_reacher_simulator(
                 env,
@@ -257,56 +172,171 @@ def main():
             target_traj = np.repeat(target_xy, repeats=max(1, len(x_traj)), axis=0)
             err = compute_tracking_error(np.asarray(x_traj, dtype=float), target_traj)
 
-            out_npz = os.path.join(
-                args.outdir,
-                f"run_fixedk_K{int(k):03d}_seed{int(seed):03d}.npz",
-            )
-            deepc.save_history_npz(
-                out_npz,
-                extra={
-                    "seed": int(seed),
-                    "K": int(k),
-                    "sigma_min_Mk":np.asarray(deepc.get_sigma_min_Mk_history(), dtype=float).reshape(-1),
-                    "sigma_min_all":deepc.get_sigma_min_all(),
-                    "total_cost": float(get_cost_dict(cost_obj).get("cost", np.nan)),
-                    "rmse_ee": float(np.sqrt(safe_stat(err * err, np.mean, default=np.nan))),
-                    "solve_time_ms":np.asarray(deepc.get_solve_time_ms_history(), dtype=float).reshape(-1),
-                    "slack_norm_inf":np.asarray(deepc.get_slack_norm_inf_history(), dtype=float).reshape(-1),
-                    "slack_violation":np.asarray(deepc.get_slack_violation_history(), dtype=int).reshape(-1),
-                    "status":np.asarray(deepc.get_status_history(), dtype=object).reshape(-1),
-                    "ISE":float(get_cost_dict(cost_obj).get("ISE", np.nan)),
-                    "IAE":float(get_cost_dict(cost_obj).get("IAE", np.nan)),
-                    "trajectory":{
-                        "x_traj":np.asarray(x_traj, dtype=float),
-                        "u_traj":np.asarray(u_traj, dtype=float),
-                        "target_traj":np.asarray(target_traj, dtype=float),
-                        "err":np.asarray(err, dtype=float),
-                    }
-                },
-            )
+            print(f"Seed: {seed}, K: {k}, cost: {float(get_cost_dict(cost_obj).get("cost", np.nan))}, Sigma_min_all: {deepc.get_sigma_min_all()}, sigma_min_Mk: {np.mean(deepc.get_sigma_min_Mk_history())}")
+            
+            #설정 : seed, 실험 종류, dataset, max_steps
+            #구조 : K, sigma min all, sigma min Mk
+            #성능 : cost, rmse, success, solve_ms, local_gate_fail, cond_gate_fail, slack inf norm, status, trajectory
             results.append({
-                "seed": int(seed),
-                    "K": int(k),
-                    "sigma_min_Mk":np.asarray(deepc.get_sigma_min_Mk_history(), dtype=float).reshape(-1),
-                    "sigma_min_all":deepc.get_sigma_min_all(),
-                    "total_cost": float(get_cost_dict(cost_obj).get("cost", np.nan)),
-                    "rmse_ee": float(np.sqrt(safe_stat(err * err, np.mean, default=np.nan))),
-                    "solve_time_ms":np.asarray(deepc.get_solve_time_ms_history(), dtype=float).reshape(-1),
-                    "slack_norm_inf":np.asarray(deepc.get_slack_norm_inf_history(), dtype=float).reshape(-1),
-                    "slack_violation":np.asarray(deepc.get_slack_violation_history(), dtype=int).reshape(-1),
-                    "status":np.asarray(deepc.get_status_history(), dtype=object).reshape(-1),
-                    "ISE":float(get_cost_dict(cost_obj).get("ISE", np.nan)),
-                    "IAE":float(get_cost_dict(cost_obj).get("IAE", np.nan)),
-                    "trajectory":{
-                        "x_traj":np.asarray(x_traj, dtype=float),
-                        "u_traj":np.asarray(u_traj, dtype=float),
-                        "target_traj":np.asarray(target_traj, dtype=float),
-                        "err":np.asarray(err, dtype=float),
-                    }
+                "seed": seed,
+                "experiment_type": "fixed_k",
+                "dataset": dataset,
+                "max_steps": max_steps,
+                "K": k,
+                "sigma_min_all": deepc.get_sigma_min_all(),
+                "sigma_min_Mk": deepc.get_sigma_min_Mk_history(),
+                "cost": float(get_cost_dict(cost_obj).get("cost", np.nan)),
+                "rmse": float(np.sqrt(np.mean(err * err))),
+                "success": int(compute_success(err, eps=0.01, window=20)),
+                "solve_ms": deepc.get_solve_time_ms_history(),
+                "local_gate_fail": int(deepc._local_gate_fail),
+                "cond_gate_fail": int(deepc._cond_gate_fail),
+                "slack_inf_norm": deepc.get_slack_norm_inf_history(),
+                "status": deepc.get_status_history(),
+                "trajectory": {  
+                    "x_traj": np.asarray(x_traj, dtype=float),
+                    "u_traj": np.asarray(u_traj, dtype=float),
+                    "target_traj": np.asarray(target_traj, dtype=float),
+                    "err": np.asarray(err, dtype=float),
+                },
             })
-    env.close()
+          
+            print(f"Seed: {seed}, K: {k}, cost: {float(get_cost_dict(cost_obj).get("cost", np.nan))}, Sigma_min_all: {deepc.get_sigma_min_all()}, sigma_min_Mk: {np.mean(deepc.get_sigma_min_Mk_history())}")
+            env.close()
 
-    plot_results(results, args.outdir)
+    #save results to csv
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(os.path.join(outdir, "results.csv"), index=False)
+
+    plot_results(results_df, outdir)
+
+
+import matplotlib.pyplot as plt
+
+METRICS_7 = [
+    ("sigma_mk_min", "sigma_min(Mk)"),
+    ("K_opt_mean", "K_opt Mean"),
+    ("cost", "Total Cost"),
+    ("rmse", "RMSE"),
+    ("solve_mean", "Mean Solve Time (ms)"),
+    ("slack_max", "Slack Max"),
+    ("solver_opt_rate", "Solver Optimal Rate"),
+]
+
+
+def _safe_hist(value, reducer):
+    arr = np.asarray(value, dtype=float).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return np.nan
+    return float(reducer(arr))
+
+
+def _build_run_level_df(results_df):
+    rows = []
+    for r in results_df.to_dict("records"):
+        status_hist = np.asarray(r.get("status", []), dtype=object).reshape(-1)
+        status_l = np.array([str(x).lower() for x in status_hist], dtype=object)
+        opt_rate = float(np.mean([("optimal" in s) for s in status_l])) if status_l.size else np.nan
+
+        rows.append(
+            {
+                "K": int(r["K"]),
+                "sigma_mk_min": _safe_hist(r.get("sigma_min_Mk", []), np.min),
+                "K_opt_mean": float(r["K"]),  # fixed-k path
+                "cost": float(r.get("cost", np.nan)),
+                "rmse": float(r.get("rmse", np.nan)),
+                "solve_mean": _safe_hist(r.get("solve_ms", []), np.mean),
+                "slack_max": _safe_hist(r.get("slack_inf_norm", []), np.max),
+                "solver_opt_rate": opt_rate,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _aggregate_by_k(run_df, metric_cols):
+    rep_rows = []
+    for k, sub in run_df.groupby("K"):
+        row = {"K": int(k)}
+        for m in metric_cols:
+            v = sub[m].to_numpy(dtype=float)
+            row[f"{m}_mean"] = float(np.nanmean(v))
+            row[f"{m}_median"] = float(np.nanmedian(v))
+            row[f"{m}_p10"] = float(np.nanpercentile(v, 10))
+            row[f"{m}_p90"] = float(np.nanpercentile(v, 90))
+            row[f"{m}_min"] = float(np.nanmin(v))
+            row[f"{m}_max"] = float(np.nanmax(v))
+        rep_rows.append(row)
+    return pd.DataFrame(rep_rows).sort_values("K")
+
+
+def _plot_one(ax, rep_df, metric, label, center):
+    x = rep_df["K"].to_numpy(dtype=float)
+    main = rep_df[f"{metric}_{center}"].to_numpy(dtype=float)
+    p10 = rep_df[f"{metric}_p10"].to_numpy(dtype=float)
+    p90 = rep_df[f"{metric}_p90"].to_numpy(dtype=float)
+    mn = rep_df[f"{metric}_min"].to_numpy(dtype=float)
+    mx = rep_df[f"{metric}_max"].to_numpy(dtype=float)
+
+    ax.plot(x, main, "-o", color="#2ca02c", label=center)
+    ax.fill_between(x, p10, p90, color="#2ca02c", alpha=0.2, label="p10-p90")
+    ax.plot(x, mn, "--", color="#7f7f7f", linewidth=1, label="min")
+    ax.plot(x, mx, "--", color="#9467bd", linewidth=1, label="max")
+    ax.set_title(f"{label} vs K")
+    ax.set_xlabel("K")
+    ax.set_ylabel(label)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+
+
+def plot_kopt_sigma(results_df, out_png, center="median"):
+    run_df = _build_run_level_df(results_df)
+    rep = _aggregate_by_k(run_df, ["sigma_mk_min", "K_opt_mean"])
+    fig, axs = plt.subplots(2, 1, figsize=(12, 8), dpi=180, sharex=True)
+    _plot_one(axs[0], rep, "sigma_mk_min", "sigma_min(Mk)", center=center)
+    _plot_one(axs[1], rep, "K_opt_mean", "K_opt Mean", center=center)
+    plt.tight_layout()
+    fig.savefig(out_png, dpi=220)
+    plt.close(fig)
+
+
+def plot_7x1(results_df, out_png, center="median"):
+    run_df = _build_run_level_df(results_df)
+    rep = _aggregate_by_k(run_df, [m for m, _ in METRICS_7])
+    rep.to_csv(
+        os.path.join(os.path.dirname(out_png), f"K_stats_representative_7x1_{center}.csv"),
+        index=False,
+    )
+    fig, axs = plt.subplots(7, 1, figsize=(14, 24), dpi=180, sharex=True)
+    for i, (metric, label) in enumerate(METRICS_7):
+        _plot_one(axs[i], rep, metric, label, center=center)
+    plt.tight_layout()
+    fig.savefig(out_png, dpi=220)
+    plt.close(fig)
+
+
+def plot_results(results_df, outdir):
+    # requested outputs: mean/median versions
+    plot_kopt_sigma(
+        results_df,
+        os.path.join(outdir, "fig_fixedk_kopt_sigma_median.png"),
+        center="median",
+    )
+    plot_kopt_sigma(
+        results_df,
+        os.path.join(outdir, "fig_fixedk_kopt_sigma_mean.png"),
+        center="mean",
+    )
+    plot_7x1(
+        results_df,
+        os.path.join(outdir, "fig_fixedk_representative_7x1_median.png"),
+        center="median",
+    )
+    plot_7x1(
+        results_df,
+        os.path.join(outdir, "fig_fixedk_representative_7x1_mean.png"),
+        center="mean",
+    )
 
 
 if __name__ == "__main__":

@@ -45,18 +45,6 @@ def safe_stat(values, fn, default=np.nan):
     return float(fn(arr))
 
 
-def history_or_default(controller, method_name, length, default=np.nan, dtype=float):
-    method = getattr(controller, method_name, None)
-    if callable(method):
-        try:
-            arr = np.asarray(method())
-            if arr.size > 0:
-                return arr
-        except Exception:
-            pass
-    return np.full(max(1, int(length)), default, dtype=dtype)
-
-
 def parse_bool_arg(value):
     if isinstance(value, bool):
         return value
@@ -202,29 +190,20 @@ def main():
     )
 
 
-    use_select_baseline = (not bool(args.d_gate)) and (not bool(args.cond_gate))
-    if use_select_baseline:
-        deepc = SelectDeePC(
-            controller_args,
-            selector_callback=LkSelector(order=2),
-            num_hankel_cols=int(args.K),
-            n_iter=int(args.n_iter),
-        )
-    else:
-        deepc = AdaptiveSelectDeePC(
-            controller_args,
-            selector_callback=AdaptiveLkSelector(order=2),
-            sigma_bar=float(args.sigma_bar),
-            N_loc=int(args.N_loc),
-            d_max=float(args.d_max),
-            num_hankel_cols=int(args.K),
-            n_iter=int(args.n_iter),
-            K_min=int(args.Kmin),
-            K_max=int(args.Kmax),
-            K_step=int(args.Kstep),
-            d_gate_enabled=bool(args.d_gate),
-            cond_gate_enabled=bool(args.cond_gate),
-        )
+    deepc = AdaptiveSelectDeePC(
+        controller_args,
+        selector_callback=AdaptiveLkSelector(order=2),
+        sigma_bar=float(args.sigma_bar),
+        N_loc=int(args.N_loc),
+        d_max=float(args.d_max),
+        num_hankel_cols=int(args.K),
+        n_iter=int(args.n_iter),
+        K_min=int(args.Kmin),
+        K_max=int(args.Kmax),
+        K_step=int(args.Kstep),
+        d_gate_enabled=bool(args.d_gate),
+        cond_gate_enabled=bool(args.cond_gate),
+    )
 
     scheduler = ReacherSetpointScheduler(
         env, controller_args.deepc_dims, num_extra_targets=int(args.num_extra_targets)
@@ -261,41 +240,23 @@ def main():
         args.outdir,
         f"run_{mode_tag}_K{int(args.K):03d}_rho{float(args.rho):.3g}_seed{int(args.seed):03d}.npz",
     )
-    if hasattr(deepc, "save_history_npz"):
-        deepc.save_history_npz(
-            out_npz,
-            extra={
-                "seed": int(args.seed),
-                "K": int(args.K),
-                "total_cost": float(get_cost_dict(cost_obj).get("cost", np.nan)),
-                "rmse_ee": float(np.sqrt(safe_stat(err * err, np.mean, default=np.nan))),
-                "success": int(success),
-                "N_loc": int(args.N_loc),
-                "d_max": float(args.d_max),
-                "sigma_bar": float(args.sigma_bar),
-                "d_gate_flag": bool(args.d_gate),
-                "cond_gate_flag": bool(args.cond_gate),
-            },
-        )
-    else:
-        np.savez_compressed(
-            out_npz,
-            seed=int(args.seed),
-            K=int(args.K),
-            total_cost=float(get_cost_dict(cost_obj).get("cost", np.nan)),
-            rmse_ee=float(np.sqrt(safe_stat(err * err, np.mean, default=np.nan))),
-            success=int(success),
-            N_loc=int(args.N_loc),
-            d_max=float(args.d_max),
-            sigma_bar=float(args.sigma_bar),
-            d_gate_flag=bool(args.d_gate),
-            cond_gate_flag=bool(args.cond_gate),
-        )
+    deepc.save_history_npz(
+        out_npz,
+        extra={
+            "seed": int(args.seed),
+            "K": int(args.K),
+            "total_cost": float(get_cost_dict(cost_obj).get("cost", np.nan)),
+            "rmse_ee": float(np.sqrt(safe_stat(err * err, np.mean, default=np.nan))),
+            "success": int(success),
+            "N_loc": int(args.N_loc),
+            "d_max": float(args.d_max),
+            "sigma_bar": float(args.sigma_bar),
+            "d_gate_flag": bool(args.d_gate),
+            "cond_gate_flag": bool(args.cond_gate),
+        },
+    )
 
-    if hasattr(deepc, "_K_opt_history"):
-        K_opts = np.asarray(deepc._K_opt_history, dtype=int)
-    else:
-        K_opts = np.full(max(1, len(x_traj)), int(args.K), dtype=int)
+    K_opts=np.asarray(deepc._K_opt_history, dtype=int)
     print(f"K_opts: {K_opts}")
     print(f"K_opts_mean: {np.mean(K_opts)}")
     print(f"K_opts_std: {np.std(K_opts)}")
@@ -307,27 +268,17 @@ def main():
         f"cost={get_cost_dict(cost_obj).get('cost', np.nan):.3e} "
         f"rmse={np.sqrt(safe_stat(err * err, np.mean, default=np.nan)):.3e} "
         f"success={int(success)} "
-        f"solve_ms={safe_stat(history_or_default(deepc, 'get_solve_time_ms_history', len(x_traj)), np.mean):.2f}"
-        f"local_gate_fail={int(getattr(deepc, '_local_gate_fail', 0))} "
-        f"cond_gate_fail={int(getattr(deepc, '_cond_gate_fail', 0))} "
+        f"solve_ms={safe_stat(deepc.get_solve_time_ms_history(), np.mean):.2f}"
+        f"local_gate_fail={deepc._local_gate_fail} "
+        f"cond_gate_fail={deepc._cond_gate_fail} "
     )
     import matplotlib.pyplot as plt
 
-    sigma_min_mk = np.asarray(
-        history_or_default(deepc, "get_sigma_min_Mk_history", len(x_traj)), dtype=float
-    ).reshape(-1)
-    solve_time_ms = np.asarray(
-        history_or_default(deepc, "get_solve_time_ms_history", len(x_traj)), dtype=float
-    ).reshape(-1)
-    slack_norm_inf = np.asarray(
-        history_or_default(deepc, "get_slack_norm_inf_history", len(x_traj)), dtype=float
-    ).reshape(-1)
-    slack_violation = np.asarray(
-        history_or_default(deepc, "get_slack_violation_history", len(x_traj), default=0.0), dtype=float
-    ).reshape(-1)
-    input_hist = np.asarray(
-        history_or_default(deepc, "get_input_history", len(x_traj), default=0.0), dtype=float
-    )
+    sigma_min_mk = np.asarray(deepc.get_sigma_min_Mk_history(), dtype=float).reshape(-1)
+    solve_time_ms = np.asarray(deepc.get_solve_time_ms_history(), dtype=float).reshape(-1)
+    slack_norm_inf = np.asarray(deepc.get_slack_norm_inf_history(), dtype=float).reshape(-1)
+    slack_violation = np.asarray(deepc.get_slack_violation_history(), dtype=float).reshape(-1)
+    input_hist = np.asarray(deepc.get_input_history(), dtype=float)
     if input_hist.ndim == 1:
         input_hist = input_hist.reshape(-1, 1)
 
@@ -339,10 +290,7 @@ def main():
     elif k_opts_plot.size > n_step:
         k_opts_plot = k_opts_plot[:n_step]
 
-    status_raw = np.asarray(
-        history_or_default(deepc, "get_status_history", len(x_traj), default="unknown", dtype=object),
-        dtype=object,
-    ).reshape(-1)
+    status_raw = np.asarray(deepc.get_status_history(), dtype=object).reshape(-1)
     if status_raw.size > n_step:
         status_raw = status_raw[:n_step]
     if status_raw.size > 0 and isinstance(status_raw[0], str):

@@ -27,6 +27,77 @@ def _to_scalar_float(value, default=np.nan) -> float:
     return float(arr[0])
 
 
+def _history_size(values) -> int:
+    return int(np.asarray(values, dtype=object).reshape(-1).size)
+
+
+def _align_numeric_history(values, n_step: int, fill=np.nan) -> np.ndarray:
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if n_step <= 0:
+        return arr
+    out = np.full(int(n_step), float(fill), dtype=float)
+    if arr.size == 0:
+        return out
+    if arr.size == n_step:
+        out[:] = arr
+        return out
+    if arr.size > n_step:
+        chunks = np.array_split(arr, int(n_step))
+        out[:] = [float(chunk[-1]) if chunk.size else float(fill) for chunk in chunks]
+        return out
+    out[: arr.size] = arr
+    return out
+
+
+def _align_object_history(values, n_step: int, fill_value=None) -> np.ndarray:
+    arr = np.asarray(values, dtype=object).reshape(-1)
+    if n_step <= 0:
+        return arr
+    out = np.empty(int(n_step), dtype=object)
+    out[:] = fill_value
+    if arr.size == 0:
+        return out
+    if arr.size == n_step:
+        out[:] = arr
+        return out
+    if arr.size > n_step:
+        chunks = np.array_split(arr, int(n_step))
+        out[:] = [chunk[-1] if chunk.size else fill_value for chunk in chunks]
+        return out
+    out[: arr.size] = arr
+    return out
+
+
+def _align_selected_idcs_history(values, n_step: int) -> np.ndarray:
+    arr = np.asarray(values, dtype=object).reshape(-1)
+    if n_step <= 0:
+        return arr
+    aligned = []
+    if arr.size == 0:
+        aligned = [np.array([], dtype=int) for _ in range(int(n_step))]
+    elif arr.size > n_step:
+        for chunk in np.array_split(arr, int(n_step)):
+            cols = chunk[-1] if chunk.size else np.array([], dtype=int)
+            aligned.append(np.asarray(cols, dtype=int).reshape(-1))
+    else:
+        aligned = [np.asarray(cols, dtype=int).reshape(-1) for cols in arr]
+        aligned.extend(np.array([], dtype=int) for _ in range(int(n_step) - arr.size))
+    return np.asarray(aligned, dtype=object)
+
+
+def _sigma_min_from_cols(matrix: np.ndarray, cols) -> float:
+    cols_arr = np.asarray(cols, dtype=int).reshape(-1)
+    if cols_arr.size == 0:
+        return np.nan
+    try:
+        singular_values = np.linalg.svd(matrix[:, cols_arr], compute_uv=False)
+    except np.linalg.LinAlgError:
+        return np.nan
+    if singular_values.size == 0:
+        return np.nan
+    return float(singular_values[-1])
+
+
 class DataDrivenPredictiveController(BaseController):
     """Data Driven Predictive Controller class which produces control actions based on
     the linearized system equations.
@@ -76,6 +147,8 @@ class DataDrivenPredictiveController(BaseController):
         self._last_eq_res_y_past = np.nan
         self._last_eq_res_u_fut = np.nan
         self._last_kkt_residual = np.nan
+
+        self._g_val=None
 
     @classmethod
     def create_from_data(
@@ -353,9 +426,10 @@ class DataDrivenPredictiveController(BaseController):
                 RuntimeWarning,
             )
             computed_action = np.zeros(self._m, dtype=float)
-
+        
         # Residual logging: primal equality residuals and a practical KKT proxy.
         if self._g.value is not None:
+            self._g_val = self._g.value
             g_val = np.asarray(self._g.value, dtype=float).reshape(-1)
             u_val = (
                 np.asarray(self._u.value, dtype=float).reshape(-1)
@@ -878,6 +952,7 @@ class AdaptiveSelectDeePC(BaseController):
         self._d_gate_enabled = d_gate_enabled
         self._cond_gate_enabled = cond_gate_enabled
         self._gate_enabled = d_gate_enabled or cond_gate_enabled
+        self._g_val_history = []
         # Fixed-K mode should honor num_hankel_cols directly.
     
         self._A_g = np.vstack([self._H_u, self._H_y[: self._dims.p * self._T_past, :]])
@@ -913,8 +988,8 @@ class AdaptiveSelectDeePC(BaseController):
             time_after_sel = perf_counter()
             
             #debug
-            print(np.min(norms), np.median(norms), np.max(norms))
-            print(np.percentile(norms, [1,5,10,50,90,99]))
+            # print(np.min(norms), np.median(norms), np.max(norms))
+            # print(np.percentile(norms, [1,5,10,50,90,99]))
             
             N_loc=self._N_loc
             d_max=self._d_max
@@ -957,11 +1032,14 @@ class AdaptiveSelectDeePC(BaseController):
                 cand = idcs[norms[idcs] <= d_max]
                 if cand.size <self._K_min:
                     cand = idcs[:self._K_min]
-                    local_gate_fail += 1
+                    self._local_gate_fail += 1
                 idcs = cand
                 self._last_selected_idcs = idcs.copy()    
             elif not self._d_gate_enabled and self._cond_gate_enabled:
-                cand = idcs[:self._K_max]
+                cand = idcs[norms[idcs] <= d_max]
+                if cand.size <self._K_min:
+                    cand = idcs[:self._K_min]
+                    self._local_gate_fail += 1
                 S,sig_actual,s_k,fail = self.cpqr_sigma_gate(
                     cand=cand,
                     Up_all=Up_all,
@@ -1030,6 +1108,8 @@ class AdaptiveSelectDeePC(BaseController):
             self._solve_time_avg["selection"].update(time_after_sel - time_before_sel)
             self._solve_time_avg["solve"].update(time_after_solve - time_before_solve)
 
+            self._g_val_history.append(self._deepc._g_val)   
+
         self._min_selected_sigma_history.append(step_min_sigma)
         self._u_past = np.append(self._u_past[self._dims.m :], action)
 
@@ -1052,23 +1132,37 @@ class AdaptiveSelectDeePC(BaseController):
 
         return action
 
+    def _sigma_min_from_gram(self, M: np.ndarray) -> float:
+        """Compute sigma_min(M) via smallest eigenvalue of Gram matrix."""
+        M_arr = np.asarray(M, dtype=float)
+        if M_arr.ndim != 2 or M_arr.size == 0 or M_arr.shape[1] == 0:
+            return np.nan
+        if not np.all(np.isfinite(M_arr)):
+            return np.nan
+        try:
+            # Use the smaller Gram matrix for efficiency and robustness.
+            if M_arr.shape[0] <= M_arr.shape[1]:
+                gram = M_arr @ M_arr.T
+            else:
+                gram = M_arr.T @ M_arr
+            evals = np.linalg.eigvalsh(gram)
+        except (np.linalg.LinAlgError, ValueError, FloatingPointError):
+            return np.nan
+        if evals.size == 0:
+            return np.nan
+        lam_min = float(np.min(evals))
+        if not np.isfinite(lam_min):
+            return np.nan
+        return float(np.sqrt(max(0.0, lam_min)))
+
     def _sigma_min_cols(self, M: np.ndarray, cols: np.ndarray) -> float:
         """Return sigma_min of M[:, cols]. cols는 1D index array."""
         if cols.size == 0:
             return np.nan
-        try:
-            s = np.linalg.svd(M[:, cols], compute_uv=False)
-        except np.linalg.LinAlgError:
-            return np.nan
-        return float(s[-1])
+        return self._sigma_min_from_gram(M[:, cols])
 
     def _sigma_min_matrix(self, M):
-        if M.size == 0 or M.shape[1] == 0: return np.nan
-        try:
-            s = np.linalg.svd(M, compute_uv=False)
-        except np.linalg.LinAlgError:
-            return np.nan
-        return float(s[-1])
+        return self._sigma_min_from_gram(M)
 
     def cpqr_sigma_gate(
         self,
@@ -1132,6 +1226,14 @@ class AdaptiveSelectDeePC(BaseController):
 
         sigma_Ag = self._sigma_min_cols(A_g, idcs[:K])
         return idcs[:K], K, sigma_ref, sigma_Hu
+
+    def get_g_val_history(self):
+        # g can be variable-length across steps (selected column count changes),
+        # so preserve ragged history as object array.
+        return np.asarray(
+            [np.asarray(g, dtype=float).reshape(-1) for g in self._g_val_history],
+            dtype=object,
+        )
 
     def get_sigma_min_all(self):
         return float(self._sigma_min_all)
@@ -1205,24 +1307,63 @@ class AdaptiveSelectDeePC(BaseController):
         return np.asarray(self._input_history, dtype=float)
     def save_history_npz(self, path: str, extra: Optional[dict] = None) -> None:
         """Save per-step histories to a .npz file for offline postprocessing."""
+        n_step = max(
+            _history_size(self._solve_time_ms_history),
+            _history_size(self._status_history),
+            _history_size(self._input_history),
+            _history_size(self._tracking_cost_history),
+            _history_size(self._slack_norm_inf_history),
+            _history_size(self._min_selected_sigma_history),
+        )
+        k_opt = _align_numeric_history(self._K_opt_history, n_step)
+        selected_idcs = _align_selected_idcs_history(self._selected_idcs_history, n_step)
+        sigma_min_hu = _align_numeric_history(self._min_selected_sigma_history, n_step)
+        sigma_min_ag = _align_numeric_history(self._sigma_min_A_history, n_step)
+        if n_step > 0 and not np.isfinite(sigma_min_ag).any():
+            sigma_min_ag = np.asarray(
+                [_sigma_min_from_cols(self._A_g, cols) for cols in selected_idcs],
+                dtype=float,
+            )
+        sigma_min_mk = _align_numeric_history(self._sigma_min_Mk_history, n_step)
+        slack_inf = _align_numeric_history(self._slack_norm_inf_history, n_step)
+        slack_fail = _align_numeric_history(self._slack_violation_history, n_step, fill=np.nan)
+        if n_step > 0 and not np.isfinite(slack_fail).any():
+            eps_sigma = float(getattr(self, "_eps_sigma", 0.0))
+            slack_fail = np.where(np.isfinite(slack_inf), slack_inf > eps_sigma, False).astype(float)
+        tracking_cost = _align_numeric_history(self._tracking_cost_history, n_step)
+        input_cost = _align_numeric_history(self._input_cost_history, n_step)
+        stage_cost = _align_numeric_history(self._stage_cost_history, n_step)
+        if n_step > 0 and not np.isfinite(stage_cost).any():
+            if np.isfinite(input_cost).any():
+                stage_cost = tracking_cost + input_cost
+            else:
+                stage_cost = tracking_cost.copy()
+        solve_time_ms = _align_numeric_history(self._solve_time_ms_history, n_step)
+        solver_status = _align_object_history(self._status_history, n_step, fill_value="missing")
+        eq_residual = _align_numeric_history(self._eq_residual_history, n_step)
+        eq_res_u_past = _align_numeric_history(self._eq_res_u_past_history, n_step)
+        eq_res_y_past = _align_numeric_history(self._eq_res_y_past_history, n_step)
+        eq_res_u_fut = _align_numeric_history(self._eq_res_u_fut_history, n_step)
+        kkt_residual = _align_numeric_history(self._kkt_residual_history, n_step)
         payload = {
-            "K_opt": np.asarray(self._K_opt_history, dtype=float),
-            "selected_idcs": np.asarray(self._selected_idcs_history, dtype=object),
-            "sigma_min_Hu": np.asarray(self._min_selected_sigma_history, dtype=float),
-            "sigma_min_Ag": np.asarray(self._sigma_min_A_history, dtype=float),
-            "sigma_min_Mk": np.asarray(self._sigma_min_Mk_history, dtype=float),
-            "slack_inf": np.asarray(self._slack_norm_inf_history, dtype=float),
-            "slack_fail": np.asarray(self._slack_violation_history, dtype=int),
-            "tracking_cost": np.asarray(self._tracking_cost_history, dtype=float),
-            "input_cost": np.asarray(self._input_cost_history, dtype=float),
-            "stage_cost": np.asarray(self._stage_cost_history, dtype=float),
-            "solve_time_ms": np.asarray(self._solve_time_ms_history, dtype=float),
-            "solver_status": np.asarray(self._status_history, dtype=object),
-            "eq_residual": np.asarray(self._eq_residual_history, dtype=float),
-            "eq_res_u_past": np.asarray(self._eq_res_u_past_history, dtype=float),
-            "eq_res_y_past": np.asarray(self._eq_res_y_past_history, dtype=float),
-            "eq_res_u_fut": np.asarray(self._eq_res_u_fut_history, dtype=float),
-            "kkt_residual": np.asarray(self._kkt_residual_history, dtype=float),
+            "num_steps": np.asarray([int(n_step)], dtype=int),
+            "K_opt": k_opt,
+            "selected_idcs": selected_idcs,
+            "sigma_min_Hu": sigma_min_hu,
+            "sigma_min_Ag": sigma_min_ag,
+            "sigma_min_Mk": sigma_min_mk,
+            "slack_inf": slack_inf,
+            "slack_fail": slack_fail.astype(int) if slack_fail.size else slack_fail,
+            "tracking_cost": tracking_cost,
+            "input_cost": input_cost,
+            "stage_cost": stage_cost,
+            "solve_time_ms": solve_time_ms,
+            "solver_status": solver_status,
+            "eq_residual": eq_residual,
+            "eq_res_u_past": eq_res_u_past,
+            "eq_res_y_past": eq_res_y_past,
+            "eq_res_u_fut": eq_res_u_fut,
+            "kkt_residual": kkt_residual,
             "eps_sigma": np.asarray([float(getattr(self, "_eps_sigma", np.nan))]),
         }
         if extra is not None:
@@ -1231,7 +1372,7 @@ class AdaptiveSelectDeePC(BaseController):
         np.savez_compressed(path, **payload)
 
 
-class SelectDeePC_analyze(BaseController):
+class AdaptiveSelectDeePC_analyze(BaseController):
     """Select-DeePC which selects the datapoints with minimal weights."""
 
     def __init__(
@@ -1242,14 +1383,7 @@ class SelectDeePC_analyze(BaseController):
         n_iter: int = 1,
         debug: bool = False,
         adaptive_k: bool = False,
-        K_min: int = 20,
-        K_max: int = 200,
-        K_step: int = 1,
-        sigma_bar: float = 1e-6,
-        rho: float = 0.1,
-        gamma_min: float = 1e-6,
-        N_loc: int = 1000,
-        d_max: float = 10.0,
+        idcs_history: np.ndarray = None,
     ):
         self._debug = debug
         self._T_past = deepc_args.deepc_dims.T_past
@@ -1334,8 +1468,6 @@ class SelectDeePC_analyze(BaseController):
         self._K_min = K_min
         self._K_max = K_max
         self._K_step = K_step
-        self._rho = rho
-        self._gamma_min = gamma_min
         
 
         # Respect constructor arguments instead of hard-coded defaults.
@@ -1380,12 +1512,16 @@ class SelectDeePC_analyze(BaseController):
 
         
 
+
+        
+
     def compute_action(self, state, reference):
         step_min_sigma = np.nan
 
         once=True
 
-
+    #set perturbation
+        
         if self._deepc is None:
             self._y_past = np.tile(state, self._T_past)
             self._u_past = np.tile(np.zeros(self._dims.m), self._T_past)
@@ -1420,64 +1556,16 @@ class SelectDeePC_analyze(BaseController):
         self._ranked_idcs_history.append(np.array(idcs, dtype=int))
         self._ranked_norms_history.append(np.array(norms, dtype=float))
 
-        N_loc=self._N_loc
-        d_max=self._d_max
         m = self._dims.m
-        p = self._dims.p
         Tp = self._T_past
         Tf = self._T_fut
         u_ini_rows = m * Tp
         u_tot_rows = m * (Tp + Tf)
-        Up_all = self._H_u[:u_ini_rows, :]               # (mTp, N)
-        Uf_all = self._H_u[u_ini_rows:u_tot_rows, :]     # (mTf, N)
 
-        # selectin gates
+        # use idcs_history and norms_history
+        idcs = self._idcs_history
+        norms = self._norms_history
         # ---- d-gate ----
-        cand = idcs[:N_loc]
-        d_k = norms[cand].max()
-        if d_k > d_max:
-            self._local_gate_fail += 1
-            # 최소 fallback: 후보 풀을 넓혀서라도 시도 
-            cand = idcs[:min(idcs.size, 3*N_loc)]
-        self._d_k_history.append(float(d_k))
-        
-
-        # ---- CPQR + sigma-gate: minimal subset ----
-        S, sig_actual, s_k, fail = self.cpqr_sigma_gate(
-            cand=cand,
-            Up_all=Up_all,
-            Uf_all=Uf_all,
-            sigma_bar=self._sigma_bar,   # = underline_sigma
-            K_min=self._K_min,
-            K_max=min(self._K_max, cand.size),
-        )
-
-        if fail:
-            self._cond_gate_fail += 1
-            # 정책: bank update / sigma_bar 완화 / N_loc 확대
-            # 일단은 fallback으로 top-K 사용(혹은 bank update)
-            idcs = cand[:self._num_hankel_cols]
-        else:
-            idcs = S
-            self._sigma_min_A_history.append(sig_actual)
-
-        if self._sigma_min_all is None:
-            Mk=np.vstack([Up_all, Uf_all])
-            sigma_min_all=self._sigma_min_matrix(Mk)
-            self._sigma_min_all=sigma_min_all
-        
-    
-        # if once:
-        #     print(f"step_min_sigma_Mk: {step_min_sigma_Mk}")
-        #     once=False
-        Mk_sel = np.vstack([Up_all[:, idcs], Uf_all[:, idcs]])
-        sigma_min_Mk_selected = self._sigma_min_matrix(Mk_sel)
-        self._sigma_min_Mk_history.append(sigma_min_Mk_selected)
-        self._selected_idcs_history.append(idcs.copy())
-        self._last_selected_idcs = np.array(idcs, dtype=int)
-        self._K_opt_history.append(idcs.size)
-        #####----#####
-        
 
 
         prev_u = None
@@ -1537,7 +1625,10 @@ class SelectDeePC_analyze(BaseController):
 
         ####-----####
 
-        return action
+        y = self._deepc.get_planned_state_trajectory()
+        g_val=self._deepc._g_val
+
+        return action, y, g_val
 
     def _sigma_min_cols(self, M: np.ndarray, cols: np.ndarray) -> float:
         """Return sigma_min of M[:, cols]. cols는 1D index array."""
@@ -1691,24 +1782,63 @@ class SelectDeePC_analyze(BaseController):
         return np.asarray(self._input_history, dtype=float)
     def save_history_npz(self, path: str, extra: Optional[dict] = None) -> None:
         """Save per-step histories to a .npz file for offline postprocessing."""
+        n_step = max(
+            _history_size(self._solve_time_ms_history),
+            _history_size(self._status_history),
+            _history_size(self._input_history),
+            _history_size(self._tracking_cost_history),
+            _history_size(self._slack_norm_inf_history),
+            _history_size(self._min_selected_sigma_history),
+        )
+        k_opt = _align_numeric_history(self._K_opt_history, n_step)
+        selected_idcs = _align_selected_idcs_history(self._selected_idcs_history, n_step)
+        sigma_min_hu = _align_numeric_history(self._min_selected_sigma_history, n_step)
+        sigma_min_ag = _align_numeric_history(self._sigma_min_A_history, n_step)
+        if n_step > 0 and not np.isfinite(sigma_min_ag).any():
+            sigma_min_ag = np.asarray(
+                [_sigma_min_from_cols(self._A_g, cols) for cols in selected_idcs],
+                dtype=float,
+            )
+        sigma_min_mk = _align_numeric_history(self._sigma_min_Mk_history, n_step)
+        slack_inf = _align_numeric_history(self._slack_norm_inf_history, n_step)
+        slack_fail = _align_numeric_history(self._slack_violation_history, n_step, fill=np.nan)
+        if n_step > 0 and not np.isfinite(slack_fail).any():
+            eps_sigma = float(getattr(self, "_eps_sigma", 0.0))
+            slack_fail = np.where(np.isfinite(slack_inf), slack_inf > eps_sigma, False).astype(float)
+        tracking_cost = _align_numeric_history(self._tracking_cost_history, n_step)
+        input_cost = _align_numeric_history(self._input_cost_history, n_step)
+        stage_cost = _align_numeric_history(self._stage_cost_history, n_step)
+        if n_step > 0 and not np.isfinite(stage_cost).any():
+            if np.isfinite(input_cost).any():
+                stage_cost = tracking_cost + input_cost
+            else:
+                stage_cost = tracking_cost.copy()
+        solve_time_ms = _align_numeric_history(self._solve_time_ms_history, n_step)
+        solver_status = _align_object_history(self._status_history, n_step, fill_value="missing")
+        eq_residual = _align_numeric_history(self._eq_residual_history, n_step)
+        eq_res_u_past = _align_numeric_history(self._eq_res_u_past_history, n_step)
+        eq_res_y_past = _align_numeric_history(self._eq_res_y_past_history, n_step)
+        eq_res_u_fut = _align_numeric_history(self._eq_res_u_fut_history, n_step)
+        kkt_residual = _align_numeric_history(self._kkt_residual_history, n_step)
         payload = {
-            "K_opt": np.asarray(self._K_opt_history, dtype=float),
-            "selected_idcs": np.asarray(self._selected_idcs_history, dtype=object),
-            "sigma_min_Hu": np.asarray(self._min_selected_sigma_history, dtype=float),
-            "sigma_min_Ag": np.asarray(self._sigma_min_A_history, dtype=float),
-            "sigma_min_Mk": np.asarray(self._sigma_min_Mk_history, dtype=float),
-            "slack_inf": np.asarray(self._slack_norm_inf_history, dtype=float),
-            "slack_fail": np.asarray(self._slack_violation_history, dtype=int),
-            "tracking_cost": np.asarray(self._tracking_cost_history, dtype=float),
-            "input_cost": np.asarray(self._input_cost_history, dtype=float),
-            "stage_cost": np.asarray(self._stage_cost_history, dtype=float),
-            "solve_time_ms": np.asarray(self._solve_time_ms_history, dtype=float),
-            "solver_status": np.asarray(self._status_history, dtype=object),
-            "eq_residual": np.asarray(self._eq_residual_history, dtype=float),
-            "eq_res_u_past": np.asarray(self._eq_res_u_past_history, dtype=float),
-            "eq_res_y_past": np.asarray(self._eq_res_y_past_history, dtype=float),
-            "eq_res_u_fut": np.asarray(self._eq_res_u_fut_history, dtype=float),
-            "kkt_residual": np.asarray(self._kkt_residual_history, dtype=float),
+            "num_steps": np.asarray([int(n_step)], dtype=int),
+            "K_opt": k_opt,
+            "selected_idcs": selected_idcs,
+            "sigma_min_Hu": sigma_min_hu,
+            "sigma_min_Ag": sigma_min_ag,
+            "sigma_min_Mk": sigma_min_mk,
+            "slack_inf": slack_inf,
+            "slack_fail": slack_fail.astype(int) if slack_fail.size else slack_fail,
+            "tracking_cost": tracking_cost,
+            "input_cost": input_cost,
+            "stage_cost": stage_cost,
+            "solve_time_ms": solve_time_ms,
+            "solver_status": solver_status,
+            "eq_residual": eq_residual,
+            "eq_res_u_past": eq_res_u_past,
+            "eq_res_y_past": eq_res_y_past,
+            "eq_res_u_fut": eq_res_u_fut,
+            "kkt_residual": kkt_residual,
             "eps_sigma": np.asarray([float(getattr(self, "_eps_sigma", np.nan))]),
         }
         if extra is not None:

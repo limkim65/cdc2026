@@ -39,18 +39,18 @@ from select_deepc.deepc_utils import (  # noqa: E402
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run fixed-k Select-DeePC sweep.")
-    parser.add_argument("--outdir", type=str, default="logs/reacher/fixed_k")
+    parser.add_argument("--outdir", type=str, default="logs/reacher/fixed_k/full_greed")
     parser.add_argument(
         "--dataset",
         type=str,
         default="iid",
         choices=["iid", "random_walk", "mixed"],
     )
-    parser.add_argument("--max_steps", type=int, default=100)
-    parser.add_argument("--seedlist", type=int, nargs="*", default=[0, 1, 2, 3, 4])
-    parser.add_argument("--k_start", type=int, default=10)
-    parser.add_argument("--k_stop", type=int, default=100)
-    parser.add_argument("--k_step", type=int, default=10)
+    parser.add_argument("--max_steps", type=int, default=400)
+    parser.add_argument("--seedlist", type=int, nargs="*", default=[0])
+    parser.add_argument("--k_start", type=int, default=50)
+    parser.add_argument("--k_stop", type=int, default=10000)
+    parser.add_argument("--k_step", type=int, default=50)
     parser.add_argument("--record_video", action="store_true")
     parser.add_argument("--enable_measurement_constraint", action="store_true")
     parser.add_argument("--num_extra_targets", type=int, default=0)

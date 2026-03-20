@@ -27,6 +27,8 @@ class LkSelector:
         """Simple L norm selector of order k. Can use a forgetting factor."""
         self._order = order
         self._custom_callback = custom_callback
+        self._ranked_idcs_history = []
+        self._ranked_norms_history = []
 
         if deepc_dims is not None:
             self._forgetter_u = np.array(
@@ -63,7 +65,15 @@ class LkSelector:
         )
 
         idcs = np.argsort(norms)
+        self._ranked_idcs_history.append(np.array(idcs, dtype=int))
+        self._ranked_norms_history.append(np.array(norms, dtype=float))
         return idcs, norms
+
+    def get_ranked_idcs_history(self):
+        return np.asarray(self._ranked_idcs_history, dtype=object)
+
+    def get_ranked_norms_history(self):
+        return np.asarray(self._ranked_norms_history, dtype=object)
 
     @staticmethod
     def position_equivariancer(H_u, H_y):
@@ -84,6 +94,8 @@ class AdaptiveLkSelector:
         """Simple L norm selector of order k. Can use a forgetting factor."""
         self._order = order
         self._custom_callback = custom_callback
+        self._ranked_idcs_history = []
+        self._ranked_norms_history = []
 
         if deepc_dims is not None:
             self._forgetter_u = np.array(
@@ -120,7 +132,15 @@ class AdaptiveLkSelector:
         )
 
         idcs = np.argsort(norms)
+        self._ranked_idcs_history.append(np.array(idcs, dtype=int))
+        self._ranked_norms_history.append(np.array(norms, dtype=float))
         return idcs, norms
+
+    def get_ranked_idcs_history(self):
+        return np.asarray(self._ranked_idcs_history, dtype=object)
+
+    def get_ranked_norms_history(self):
+        return np.asarray(self._ranked_norms_history, dtype=object)
 
     @staticmethod
     def position_equivariancer(H_u, H_y):

@@ -56,6 +56,19 @@ def parse_bool_arg(value):
     raise argparse.ArgumentTypeError(f"Expected boolean value, got: {value}")
 
 
+def configure_matplotlib(show_plots: bool):
+    import matplotlib
+
+    backend = str(matplotlib.get_backend()).lower()
+    if (not show_plots) or ("agg" not in backend):
+        return
+    if os.name == "nt":
+        try:
+            matplotlib.use("TkAgg", force=True)
+        except Exception:
+            pass
+
+
 def plot_xy_trajectory_with_goal(
     x_traj,
     goal_xy_traj,
@@ -69,10 +82,12 @@ def plot_xy_trajectory_with_goal(
     g_arr = np.asarray(goal_xy_traj, dtype=float)
     if x_arr.ndim != 2 or x_arr.shape[0] == 0:
         return
-    if x_arr.shape[1] < 10:
+    if x_arr.shape[1] >= 10:
+        ee_xy = x_arr[:, 4:6] + x_arr[:, 8:10]
+    elif x_arr.shape[1] >= 6:
+        ee_xy = x_arr[:, 4:6]
+    else:
         return
-
-    ee_xy = x_arr[:, 4:6] + x_arr[:, 8:10]
     n = min(ee_xy.shape[0], g_arr.shape[0] if g_arr.ndim == 2 else 0)
     if n <= 0:
         return
@@ -92,9 +107,66 @@ def plot_xy_trajectory_with_goal(
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()
-    fig.savefig(os.path.join(outdir, filename))
+    out_path = os.path.join(outdir, filename)
+    fig.savefig(out_path)
+    print(f"[plot] saved: {out_path}")
     if show:
-        plt.show()
+        plt.show(block=False)
+        plt.pause(0.1)
+
+
+def plot_xy_components_vs_time(
+    x_traj,
+    goal_xy_traj,
+    outdir,
+    filename="fig_xy_components_vs_time.png",
+    show=False,
+):
+    import matplotlib.pyplot as plt
+
+    x_arr = np.asarray(x_traj, dtype=float)
+    g_arr = np.asarray(goal_xy_traj, dtype=float)
+    if x_arr.ndim != 2 or x_arr.shape[0] == 0 or g_arr.ndim != 2:
+        return
+
+    if x_arr.shape[1] >= 10:
+        ee_xy = x_arr[:, 4:6] + x_arr[:, 8:10]
+    elif x_arr.shape[1] >= 6:
+        ee_xy = x_arr[:, 4:6]
+    else:
+        return
+
+    n = min(ee_xy.shape[0], g_arr.shape[0])
+    if n <= 0:
+        return
+
+    ee_xy = ee_xy[:n]
+    g_arr = g_arr[:n]
+    t = np.arange(n, dtype=int)
+
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6), dpi=160, sharex=True)
+
+    axes[0].plot(t, ee_xy[:, 0], color="#1f77b4", linewidth=1.8, label="x(t) traj")
+    axes[0].plot(t, g_arr[:, 0], color="#d62728", linewidth=1.5, linestyle="--", label="x(t) ref")
+    axes[0].set_ylabel("x")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend()
+
+    axes[1].plot(t, ee_xy[:, 1], color="#1f77b4", linewidth=1.8, label="y(t) traj")
+    axes[1].plot(t, g_arr[:, 1], color="#d62728", linewidth=1.5, linestyle="--", label="y(t) ref")
+    axes[1].set_xlabel("step k")
+    axes[1].set_ylabel("y")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend()
+
+    fig.suptitle("End-Effector Components vs Reference")
+    fig.tight_layout()
+    out_path = os.path.join(outdir, filename)
+    fig.savefig(out_path)
+    print(f"[plot] saved: {out_path}")
+    if show:
+        plt.show(block=False)
+        plt.pause(0.1)
 
 
 def main():
@@ -129,7 +201,16 @@ def main():
         action="store_true",
         help="Enable MuJoCo rendering and RecordVideo output.",
     )
+    parser.add_argument(
+        "--show_plots",
+        type=parse_bool_arg,
+        nargs="?",
+        const=True,
+        default=True,
+        help="Show plot windows interactively (default: True).",
+    )
     args = parser.parse_args()
+    configure_matplotlib(bool(args.show_plots))
 
     os.makedirs(args.outdir, exist_ok=True)
 
@@ -230,10 +311,13 @@ def main():
         circle_omega=0.05,
         circle_phase=0.0,
         circle_clip_y_max=0.09,
+
     )
     err = compute_tracking_error(np.asarray(x_traj, dtype=float), target_traj)
     success = compute_success(err, eps=float(args.success_eps), window=int(args.success_window))
-    plot_xy_trajectory_with_goal(x_traj, target_traj, args.outdir)
+    # Do not block here; all diagnostics are shown together at the end.
+    plot_xy_trajectory_with_goal(x_traj, target_traj, args.outdir, show=False)
+    plot_xy_components_vs_time(x_traj, target_traj, args.outdir, show=False)
 
     mode_tag = "adaptive" if args.adaptive_k else "fixed"
     out_npz = os.path.join(
@@ -251,6 +335,11 @@ def main():
             "N_loc": int(args.N_loc),
             "d_max": float(args.d_max),
             "sigma_bar": float(args.sigma_bar),
+            "sigma_min_all": (
+                float(deepc.get_sigma_min_all())
+                if hasattr(deepc, "get_sigma_min_all")
+                else np.nan
+            ),
             "d_gate_flag": bool(args.d_gate),
             "cond_gate_flag": bool(args.cond_gate),
         },
@@ -282,13 +371,11 @@ def main():
     if input_hist.ndim == 1:
         input_hist = input_hist.reshape(-1, 1)
 
-    # K_opt can be appended twice per step in current controller path.
+    # K_opt can be appended twice per step in some controller paths.
     n_step = int(sigma_min_mk.size)
     k_opts_plot = np.asarray(K_opts, dtype=float).reshape(-1)
-    if k_opts_plot.size == 2 * n_step:
+    if n_step > 0 and k_opts_plot.size == 2 * n_step:
         k_opts_plot = k_opts_plot.reshape(n_step, 2)[:, 1]
-    elif k_opts_plot.size > n_step:
-        k_opts_plot = k_opts_plot[:n_step]
 
     status_raw = np.asarray(deepc.get_status_history(), dtype=object).reshape(-1)
     if status_raw.size > n_step:
@@ -300,24 +387,50 @@ def main():
     else:
         status_num = status_raw.astype(float) if status_raw.size else np.array([], dtype=float)
 
-    # Align all traces to common length.
-    n = min(
-        n_step,
+    # Robust alignment:
+    # do NOT anchor everything to sigma_min_mk, because some controller variants
+    # may not populate that history while other metrics are valid.
+    n = max(
         k_opts_plot.size,
+        sigma_min_mk.size,
         solve_time_ms.size,
         slack_norm_inf.size,
         slack_violation.size,
         input_hist.shape[0],
-        status_num.size if status_num.size > 0 else n_step,
+        status_num.size,
     )
+    if n <= 0:
+        print("[warn] no diagnostic history available to plot.")
+        return
+
+    def _pad_1d(arr, n_out, fill=np.nan):
+        out = np.full(int(n_out), float(fill), dtype=float)
+        m = min(int(n_out), int(arr.size))
+        if m > 0:
+            out[:m] = arr[:m]
+        return out
+
     t = np.arange(n, dtype=int)
-    k_opts_plot = k_opts_plot[:n]
-    sigma_min_mk = sigma_min_mk[:n]
-    solve_time_ms = solve_time_ms[:n]
-    slack_norm_inf = slack_norm_inf[:n]
-    slack_violation = slack_violation[:n]
-    input_hist = input_hist[:n, :]
-    status_num = status_num[:n] if status_num.size else np.zeros(n, dtype=float)
+    k_opts_plot = _pad_1d(k_opts_plot, n)
+    sigma_min_mk = _pad_1d(sigma_min_mk, n)
+    solve_time_ms = _pad_1d(solve_time_ms, n)
+    slack_norm_inf = _pad_1d(slack_norm_inf, n)
+    slack_violation = _pad_1d(slack_violation, n, fill=0.0)
+    status_num = _pad_1d(status_num, n, fill=0.0)
+
+    if input_hist.shape[0] < n:
+        pad_rows = n - input_hist.shape[0]
+        input_hist = np.vstack(
+            [input_hist, np.full((pad_rows, input_hist.shape[1]), np.nan, dtype=float)]
+        )
+    else:
+        input_hist = input_hist[:n, :]
+
+    print(
+        "[diag] lengths "
+        f"K={k_opts_plot.size} sigmaMk={sigma_min_mk.size} solve={solve_time_ms.size} "
+        f"slack={slack_norm_inf.size} status={status_num.size} input={input_hist.shape[0]}"
+    )
 
     fig, axes = plt.subplots(3, 2, figsize=(14, 10), dpi=160, sharex=True)
     axes = axes.flatten()
@@ -358,7 +471,9 @@ def main():
 
     fig.suptitle("Controller Diagnostics by Time Step", y=0.995)
     fig.tight_layout()
-    fig.savefig(os.path.join(args.outdir, "fig_diagnostics_subplot.png"))
+    out_fig_diag = os.path.join(args.outdir, "fig_diagnostics_subplot.png")
+    fig.savefig(out_fig_diag)
+    print(f"[plot] saved: {out_fig_diag}")
     # Backward compatibility: keep legacy single-figure outputs too.
     plt.figure(dpi=160)
     plt.plot(t, k_opts_plot, label="K_opt")
@@ -367,7 +482,9 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, "fig_K_opts.png"))
+    out_fig_k = os.path.join(args.outdir, "fig_K_opts.png")
+    plt.savefig(out_fig_k)
+    print(f"[plot] saved: {out_fig_k}")
 
     plt.figure(dpi=160)
     plt.plot(t, sigma_min_mk, label="sigma_min_Mk")
@@ -376,7 +493,9 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, "fig_sigma_min_Mk.png"))
+    out_fig_sigma = os.path.join(args.outdir, "fig_sigma_min_Mk.png")
+    plt.savefig(out_fig_sigma)
+    print(f"[plot] saved: {out_fig_sigma}")
 
     plt.figure(dpi=160)
     for j in range(input_hist.shape[1]):
@@ -386,7 +505,9 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.legend(ncol=min(2, input_hist.shape[1]))
     plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, "fig_input.png"))
+    out_fig_input = os.path.join(args.outdir, "fig_input.png")
+    plt.savefig(out_fig_input)
+    print(f"[plot] saved: {out_fig_input}")
 
     plt.figure(dpi=160)
     plt.plot(t, solve_time_ms, label="solve_time_ms")
@@ -395,7 +516,9 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, "fig_solve_time_ms.png"))
+    out_fig_solve = os.path.join(args.outdir, "fig_solve_time_ms.png")
+    plt.savefig(out_fig_solve)
+    print(f"[plot] saved: {out_fig_solve}")
 
     plt.figure(dpi=160)
     plt.plot(t, status_num, label="status(code)")
@@ -404,7 +527,9 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, "fig_status.png"))
+    out_fig_status = os.path.join(args.outdir, "fig_status.png")
+    plt.savefig(out_fig_status)
+    print(f"[plot] saved: {out_fig_status}")
 
     plt.figure(dpi=160)
     plt.plot(t, slack_norm_inf, label="slack_norm_inf")
@@ -414,8 +539,13 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(args.outdir, "fig_slack_norm_inf_and_violation.png"))
-    plt.show()
+    out_fig_slack = os.path.join(args.outdir, "fig_slack_norm_inf_and_violation.png")
+    plt.savefig(out_fig_slack)
+    print(f"[plot] saved: {out_fig_slack}")
+    if bool(args.show_plots):
+        plt.show()
+    else:
+        plt.close("all")
 
 if __name__ == "__main__":
     main()

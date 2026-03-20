@@ -231,7 +231,11 @@ def get_reacher_simulator(
 ):
     from gymnasium.envs.registration import register
 
-    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    # DISPLAY/WAYLAND are Linux-specific; on Windows this check is not meaningful.
+    if os.name == "nt":
+        has_display = True
+    else:
+        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if record_video and (not has_display) and (not force_headless_video):
         warnings.warn(
             (
@@ -246,14 +250,29 @@ def get_reacher_simulator(
     if not record_video:
         render_mode = None
 
-    # MuJoCo import can crash in headless shells if inherited MUJOCO_GL=osmesa.
-    # Prefer EGL by default unless user explicitly set another backend.
+    # Normalize GL backend across server/local setups.
+    # - Windows: egl is unsupported by mujoco Python package -> use glfw.
+    # - Linux headless: use egl when backend is unset/osmesa.
     gl_backend = os.environ.get("MUJOCO_GL", "").strip().lower()
-    if gl_backend in ("", "osmesa"):
-        os.environ["MUJOCO_GL"] = "egl"
     pyopengl_backend = os.environ.get("PYOPENGL_PLATFORM", "").strip().lower()
-    if pyopengl_backend in ("", "osmesa"):
-        os.environ["PYOPENGL_PLATFORM"] = "egl"
+    if os.name == "nt":
+        if gl_backend in ("", "egl", "osmesa"):
+            if gl_backend == "egl":
+                warnings.warn(
+                    "MUJOCO_GL=egl is not supported on Windows; switching to MUJOCO_GL=glfw.",
+                    RuntimeWarning,
+                )
+            os.environ["MUJOCO_GL"] = "glfw"
+        if pyopengl_backend in ("", "egl", "osmesa"):
+            os.environ["PYOPENGL_PLATFORM"] = "glfw"
+    else:
+        prefer_egl = (not has_display) or bool(force_headless_video)
+        if gl_backend in ("", "osmesa"):
+            os.environ["MUJOCO_GL"] = "egl" if prefer_egl else "glfw"
+        if pyopengl_backend in ("", "osmesa"):
+            os.environ["PYOPENGL_PLATFORM"] = (
+                "egl" if os.environ.get("MUJOCO_GL", "").strip().lower() == "egl" else "glfw"
+            )
 
     register(
         id="Reacher-v4-custom",
@@ -415,6 +434,7 @@ def run_reacher_simulator(
     setpoint_scheduler: SetPointScheduler = None,
     seed=0,
     deepc_cost_accumulator: Optional[PerformanceAccumulator] = None,
+    prediction_stride: int = 5,
 ):
     """Runs the simulation for a given env and controller"""
     controller_state_trajectory = []
@@ -449,7 +469,8 @@ def run_reacher_simulator(
         time_stop = perf_counter()
         controller_execution_times.append(time_stop - time_start)
 
-        if simulation_iteration % 5 == 0 and can_get_planned_trajectories:
+        stride = max(1, int(prediction_stride))
+        if simulation_iteration % stride == 0 and can_get_planned_trajectories:
             controller_state_predictions.append(
                 controller.get_planned_state_trajectory()
             )

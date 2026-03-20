@@ -22,7 +22,7 @@ from experiments.reacher.run_cdc_reacher_benchmark import (  # noqa: E402
     setup_deepc_reacher,
 )
 from select_deepc.data_selectors import AdaptiveLkSelector, LkSelector  # noqa: E402
-from select_deepc.deepc_controller import SelectDeePC, SelectDeePC_original  # noqa: E402
+from select_deepc.deepc_controller import AdaptiveSelectDeePC  # noqa: E402
 from select_deepc.deepc_utils import load_data_from_folder  # noqa: E402
 
 
@@ -474,18 +474,21 @@ def main():
     def make_large_baseline():
         return (
             "baseline_largeK",
-            SelectDeePC_original(
+            AdaptiveSelectDeePC(
                 controller_args,
                 selector_callback=LkSelector(),
                 num_hankel_cols=int(args.large_K),
                 n_iter=int(args.n_iter),
+                adaptive_k=False,
+                d_gate_enabled=False,
+                cond_gate_enabled=False,
             ),
         )
 
     def make_proposed():
         return (
             "proposed_cpqr_gate",
-            SelectDeePC(
+            AdaptiveSelectDeePC(
                 controller_args,
                 selector_callback=AdaptiveLkSelector(order=2),
                 num_hankel_cols=int(args.large_K),
@@ -497,17 +500,22 @@ def main():
                 sigma_bar=float(args.sigma_bar),
                 N_loc=int(args.N_loc),
                 d_max=float(args.d_max),
+                d_gate_enabled=True,
+                cond_gate_enabled=True,
             ),
         )
 
     def make_small_baseline():
         return (
             "baseline_smallK",
-            SelectDeePC_original(
+            AdaptiveSelectDeePC(
                 controller_args,
                 selector_callback=LkSelector(),
                 num_hankel_cols=int(args.small_K),
                 n_iter=int(args.n_iter),
+                adaptive_k=False,
+                d_gate_enabled=False,
+                cond_gate_enabled=False,
             ),
         )
 
